@@ -236,11 +236,6 @@ class Config:
     augment_sites: AugmentSitesConfig | None = None
 
     def __post_init__(self):
-        if len(self.ancestors) == 0 and self.match.reference_ts is None:
-            raise ValueError(
-                "Config must contain either an [[ancestors]] section "
-                "or [match].reference_ts"
-            )
         if self.match.keep_intermediates and self.match.workdir is None:
             raise ValueError("keep_intermediates requires workdir to be set")
         for anc in self.ancestors:
