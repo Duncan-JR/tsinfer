@@ -209,20 +209,6 @@ class TestConfigConstruction:
         assert cfg.individual_metadata is None
         assert cfg.post_process is None
 
-    def test_no_ancestors_no_reference_ts_raises(self):
-        with pytest.raises(ValueError, match="ancestors"):
-            config.Config(
-                sources={},
-                ancestors=[],
-                match=config.MatchConfig(
-                    sources={"cohort": config.MatchSourceConfig()},
-                    output="out.trees",
-                ),
-                ancestral_state=config.AncestralState(
-                    path="dummy", field="variant_ancestral_allele"
-                ),
-            )
-
     def test_reference_ts_without_ancestors_ok(self):
         cfg = config.Config(
             sources={"cohort": config.Source(path="s.vcz", name="cohort")},
@@ -725,24 +711,6 @@ output             = "out.trees"
 [match.sources.cohort]
 """
         with pytest.raises(ValueError, match="Duplicate"):
-            config.Config.from_toml(_write_toml(tmp_path, toml))
-
-    def test_no_ancestors_no_reference_ts(self, tmp_path):
-        toml = """\
-[ancestral_state]
-path  = "annotations.vcz"
-field = "variant_ancestral_allele"
-
-[[source]]
-name = "cohort"
-path = "samples.vcz"
-
-[match]
-output             = "out.trees"
-
-[match.sources.cohort]
-"""
-        with pytest.raises(ValueError, match="ancestors"):
             config.Config.from_toml(_write_toml(tmp_path, toml))
 
     def test_ancestors_missing_path(self, tmp_path):

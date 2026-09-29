@@ -402,6 +402,144 @@ class TestContigNames:
 # ---------------------------------------------------------------------------
 
 
+class TestReferenceTsEquivalence:
+    @pytest.fixture
+    def stores(self, request):
+        ploidy = request.param
+        haplotypes = np.array(
+            [
+                [0, 0, 0, 0, 0, 0, 0, 0],
+                [1, 1, 0, 0, 1, 1, 0, 0],
+                [0, 0, 1, 1, 0, 0, 1, 1],
+                [1, 0, 1, 0, 0, 1, 0, 1],
+                [0, 1, 0, 1, 1, 0, 1, 0],
+                [1, 1, 1, 1, 0, 0, 0, 0],
+            ],
+            dtype=np.int8,
+        )
+        genotypes = haplotypes[:, : 4 * ploidy].reshape(6, 4, ploidy)
+        positions = np.array([100, 200, 300, 400, 500, 600], dtype=np.int32)
+        sample_store = helpers.make_sample_vcz(
+            genotypes=genotypes,
+            positions=positions,
+            alleles=np.tile(np.array(["A", "T"]), (6, 1)),
+            ancestral_state=np.repeat("A", 6),
+            sequence_length=2000,
+            sample_population=np.array(["pop_A", "pop_B", "pop_A", "pop_B"]),
+            sample_label=np.array(["one", "two", "three", "four"]),
+        )
+        source = config.Source(path=sample_store, name="test")
+        anc_cfg = config.AncestorsConfig(name="ancestors", path=None, sources=["test"])
+        ancestor_store = ancestors.infer_ancestors(
+            source, anc_cfg, _anc_state(sample_store)
+        )
+        assert ancestor_store["sample_time"].shape[0] >= 3
+        assert np.all(ancestor_store["sample_time"][:] > 0)
+        return sample_store, ancestor_store
+
+    @pytest.mark.parametrize("stores", [1, 2], indirect=True)
+    @pytest.mark.parametrize("reference_mode", ["memory", "path"])
+    def test_split_match_equals_full_match(self, stores, reference_mode, tmp_path):
+        sample_store, ancestor_store = stores
+        sample_source = config.Source(path=sample_store, name="test")
+        ancestor_source = config.Source(
+            path=ancestor_store, name="ancestors", sample_time="sample_time"
+        )
+        sample_match = config.MatchSourceConfig()
+        individual_metadata = config.IndividualMetadataConfig(
+            fields={"label": "sample_label"}, population="sample_population"
+        )
+        full_cfg = config.Config(
+            sources={"ancestors": ancestor_source, "test": sample_source},
+            ancestors=[
+                config.AncestorsConfig(
+                    name="ancestors", path=ancestor_store, sources=["test"]
+                )
+            ],
+            match=config.MatchConfig(
+                sources={
+                    "ancestors": config.MatchSourceConfig(
+                        node_flags=0, create_individuals=False
+                    ),
+                    "test": sample_match,
+                },
+                output="full.trees",
+                path_compression=False,
+            ),
+            ancestral_state=_anc_state(sample_store),
+            individual_metadata=individual_metadata,
+        )
+        expected = pipeline.match(full_cfg, num_threads=1)
+        sample_nodes = [
+            node.id for node in expected.nodes() if node.metadata.get("source") == "test"
+        ]
+        assert any(
+            len({edge.parent for edge in expected.edges() if edge.child == node_id}) > 1
+            for node_id in sample_nodes
+        )
+        jobs = json.loads(pipeline.compute_groups_json(full_cfg))
+        sample_groups = [job["group"] for job in jobs if job["source"] == "test"]
+        first_sample_group = min(sample_groups)
+        assert all(
+            job["group"] < first_sample_group
+            for job in jobs
+            if job["source"] == "ancestors"
+        )
+        assert all(group >= first_sample_group for group in sample_groups)
+
+        ancestor_ts = pipeline.match(
+            full_cfg, group_stop=first_sample_group, num_threads=1
+        )
+        assert ancestor_ts.sequence_length == 2000
+        assert ancestor_ts.sites_position[-1] < ancestor_ts.sequence_length
+        assert ancestor_ts.num_individuals == 4
+        assert ancestor_ts.num_populations == 2
+        assert all(node.metadata.get("source") != "test" for node in ancestor_ts.nodes())
+        ancestor_tables = ancestor_ts.dump_tables()
+
+        reference_path = None
+        reference_arg = ancestor_ts
+        if reference_mode == "path":
+            reference_path = tmp_path / "ancestors.trees"
+            ancestor_ts.dump(reference_path)
+            reference_arg = None
+        sample_cfg = config.Config(
+            sources={"test": sample_source},
+            ancestors=[],
+            match=config.MatchConfig(
+                sources={"test": sample_match},
+                output="samples.trees",
+                reference_ts=reference_path,
+                path_compression=False,
+            ),
+            ancestral_state=_anc_state(sample_store),
+            individual_metadata=individual_metadata,
+        )
+        if reference_mode == "path":
+            sample_jobs = json.loads(pipeline.compute_groups_json(sample_cfg))
+            assert len(sample_jobs) == len(sample_nodes)
+            start_position = int(ancestor_ts.sites_position[0])
+            end_position = int(ancestor_ts.sites_position[-1]) + 1
+            assert all(job["start_position"] == start_position for job in sample_jobs)
+            assert all(job["end_position"] == end_position for job in sample_jobs)
+        observed = pipeline.match(sample_cfg, reference_ts=reference_arg, num_threads=1)
+        expected.tables.edges.assert_equals(observed.tables.edges)
+        expected.tables.sites.assert_equals(observed.tables.sites)
+        expected.tables.mutations.assert_equals(observed.tables.mutations)
+        assert observed.num_individuals == (
+            ancestor_ts.num_individuals + expected.num_individuals
+        )
+        assert observed.num_populations == (
+            ancestor_ts.num_populations + expected.num_populations
+        )
+        expected.simplify().tables.assert_equals(
+            observed.simplify().tables, ignore_provenance=True
+        )
+        ancestor_tables.assert_equals(ancestor_ts.dump_tables())
+        if reference_path is not None:
+            ancestor_tables.assert_equals(tskit.load(reference_path).dump_tables())
+
+
 class TestPostProcess:
     def test_simplify_reduces_nodes(self):
         sim_ts = _simulate(num_samples=6, random_seed=10)
