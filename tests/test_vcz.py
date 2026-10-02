@@ -293,6 +293,33 @@ class TestConvenienceAccessors:
         )
         assert vcz.sequence_length(store) == 999_999
 
+    @pytest.mark.parametrize("contig_index", [0, 1])
+    def test_sequence_length_multi_contig_header(self, sample_store, contig_index):
+        sample_store["contig_id"].resize((2,))
+        sample_store["contig_id"][:] = ["chr1", "chr20"]
+        sample_store["contig_length"].resize((2,))
+        sample_store["contig_length"][:] = [1000, 3000]
+        sample_store["variant_contig"][:] = contig_index
+        assert vcz.sequence_length(sample_store) == [1000, 3000][contig_index]
+
+    def test_multiple_variant_contigs_rejected(self, sample_store):
+        sample_store["variant_contig"][:] = [0, 1, 0]
+        with pytest.raises(ValueError, match="single contig"):
+            vcz.sequence_length(sample_store)
+
+    @pytest.mark.parametrize("contig_index", [-1, 1])
+    def test_invalid_contig_index(self, sample_store, contig_index):
+        sample_store["variant_contig"][:] = contig_index
+        with pytest.raises(ValueError, match="invalid contig index"):
+            vcz.sequence_length(sample_store)
+
+    def test_empty_store(self, sample_store):
+        sample_store["variant_contig"].resize((0,))
+        assert vcz.sequence_length(sample_store) == 1000
+        sample_store["contig_id"].resize((2,))
+        with pytest.raises(ValueError, match="empty multi-contig"):
+            vcz.sequence_length(sample_store)
+
 
 # ---------------------------------------------------------------------------
 # HaplotypeReader

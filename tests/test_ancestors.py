@@ -986,6 +986,11 @@ class TestInferAncestorsFormat:
             seq_len=3000,
             contig_id="chrX",
         )
+        gt["contig_id"].resize((2,))
+        gt["contig_id"][:] = ["chr1", "chrX"]
+        gt["contig_length"].resize((2,))
+        gt["contig_length"][:] = [5000, 3000]
+        gt["variant_contig"][:] = 1
         anc = ancestors.infer_ancestors(_src(gt), _cfg(), _anc_state(gt))
         assert str(anc["contig_id"][0]) == "chrX"
         assert int(anc["contig_length"][0]) == 3000

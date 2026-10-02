@@ -168,7 +168,8 @@ class TestMatch:
         assert out_ts.num_nodes > 0
         assert out_ts.num_individuals > 0
 
-    def test_hand_constructed_simple(self):
+    @pytest.mark.parametrize("contig_index", [0, 1])
+    def test_hand_constructed_simple(self, contig_index):
         """Match with a hand-constructed 2-site, 2-sample VCZ."""
         sample_store = helpers.make_sample_vcz(
             genotypes=np.array([[[0], [1]], [[1], [0]]], dtype=np.int8),
@@ -177,14 +178,25 @@ class TestMatch:
             ancestral_state=np.array(["A", "A"]),
             sequence_length=1000,
         )
+        sample_store["contig_id"].resize((2,))
+        sample_store["contig_id"][:] = ["chr1", "chr20"]
+        sample_store["contig_length"].resize((2,))
+        sample_store["contig_length"][:] = [1000, 3000]
+        sample_store["variant_contig"][:] = contig_index
         anc_cfg = config.AncestorsConfig(name="ancestors", path=None, sources=["test"])
         ancestor_store = ancestors.infer_ancestors(
             config.Source(path=sample_store, name="test"),
             anc_cfg,
             _anc_state(sample_store),
         )
+        expected_contig = ["chr1", "chr20"][contig_index]
+        expected_length = [1000, 3000][contig_index]
+        assert ancestor_store["contig_id"][:].tolist() == [expected_contig]
+        assert ancestor_store["contig_length"][:].tolist() == [expected_length]
+        np.testing.assert_array_equal(ancestor_store["variant_contig"][:], [0, 0])
         cfg = _make_config(sample_store, ancestor_store)
         out_ts = pipeline.match(cfg)
+        assert out_ts.sequence_length == expected_length
         assert out_ts.num_nodes > 0
         assert out_ts.num_sites == 2
 

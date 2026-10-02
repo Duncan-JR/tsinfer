@@ -552,6 +552,10 @@ def infer_ancestors(
             logger.info("Targets filter: %s", source.targets)
 
     view = vcz_mod.MultiSourceView(sources, ancestral_state)
+    first_store = view.source_store(0)
+    contig_index = vcz_mod.contig_index(first_store)
+    contig_id = str(first_store["contig_id"][contig_index])
+    contig_length = int(first_store["contig_length"][contig_index])
     total_haplotypes = view.num_haplotypes
     logger.info(
         "Inference sites identified: %d (%d total haplotypes)",
@@ -583,9 +587,6 @@ def infer_ancestors(
     )
     num_inf = len(final_positions)
 
-    # Use first source's store for contig metadata
-    first_store = view.source_store(0)
-
     # Determine the write path: use a PID-suffixed temp path for atomicity
     if cfg.path is not None:
         final_path = pathlib.Path(cfg.path)
@@ -599,12 +600,9 @@ def infer_ancestors(
         store_path = None  # in-memory
 
     if num_inf == 0:
-        seq_len = vcz_mod.sequence_length(first_store)
         seq_intervals = compute_sequence_intervals(
-            final_positions, seq_len, cfg.max_gap_length
+            final_positions, contig_length, cfg.max_gap_length
         )
-        contig_id = str(first_store["contig_id"][0])
-        contig_length = int(first_store["contig_length"][0])
         result = vcz_mod.write_empty_ancestor_vcz(
             seq_intervals,
             store=store_path,
@@ -618,9 +616,8 @@ def infer_ancestors(
         return result
 
     # --- 3. Compute sequence intervals ---
-    seq_len = vcz_mod.sequence_length(first_store)
     seq_intervals = compute_sequence_intervals(
-        final_positions, seq_len, cfg.max_gap_length
+        final_positions, contig_length, cfg.max_gap_length
     )
     logger.info(
         "Sequence intervals: %d (max_gap_length=%d)",
@@ -650,9 +647,6 @@ def infer_ancestors(
             _memory_usage_mb(),
         )
     site_interval_idx = _assign_site_intervals(final_positions, seq_intervals)
-
-    contig_id = str(first_store["contig_id"][0])
-    contig_length = int(first_store["contig_length"][0])
 
     # Create zarr group with fixed arrays
     zarr_root = vcz_mod.setup_ancestor_zarr(

@@ -30,7 +30,10 @@ Low-level utilities for reading and writing VCZ (VCF Zarr) stores.
     to a numpy array.  Used to resolve per-source metadata like sample_time.
 
 ``sequence_length``
-    Read the contig length from a VCZ store (``contig_length[0]``).
+    Read the length of the contig containing the variants in a VCZ store.
+
+``contig_index``
+    Resolve the single contig containing a VCZ store's variants.
 
 ``num_contigs``
     Return the number of contigs declared in a VCZ store.
@@ -402,9 +405,31 @@ def iter_raw_genotypes(store, positions, sample_include=None):
             i += 1
 
 
+def contig_index(store: zarr.Group) -> int:
+    """
+    Return the declared contig index containing the store's variants.
+
+    Native inference requires variants from a single contig, even when
+    variant filters are configured, because sites are joined by position.
+    An empty store is unambiguous only when it declares exactly one contig.
+    """
+    contigs = np.unique(store["variant_contig"][:])
+    if len(contigs) > 1:
+        raise ValueError("VCZ variants must belong to a single contig")
+    if len(contigs) == 0:
+        if num_contigs(store) != 1:
+            raise ValueError("Cannot resolve the contig of an empty multi-contig VCZ")
+        return 0
+    index = int(contigs[0])
+    if index < 0 or index >= num_contigs(store):
+        raise ValueError("variant_contig contains an invalid contig index")
+    return index
+
+
 def sequence_length(store: zarr.Group) -> int:
-    """Return the sequence length (first contig length) from a VCZ store."""
-    return int(store["contig_length"][0])
+    """Return the length of the contig containing the store's variants."""
+    index = contig_index(store)
+    return int(store["contig_length"][index])
 
 
 def num_contigs(store: zarr.Group) -> int:
