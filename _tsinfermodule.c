@@ -412,7 +412,7 @@ static void
 MatcherIndexes_dealloc(MatcherIndexes *self)
 {
     if (self->matcher_indexes != NULL) {
-        /* matcher_indexes_free(self->matcher_indexes); */
+        matcher_indexes_free(self->matcher_indexes);
         PyMem_Free(self->matcher_indexes);
         self->matcher_indexes = NULL;
     }

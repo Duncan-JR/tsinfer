@@ -1452,6 +1452,32 @@ class TestMatcherExtendCycle:
 
 
 class TestAncestorMatcherWrapper:
+    @pytest.fixture
+    def single_tree(self):
+        tables = tskit.Tree.generate_balanced(4).tree_sequence.dump_tables()
+        tables.sequence_length = 100
+        tables.edges.right = np.full(len(tables.edges), 100, dtype=np.float64)
+        for position in [10, 20, 30, 40]:
+            site = tables.sites.add_row(position=position, ancestral_state="A")
+            tables.mutations.add_row(site=site, node=1, derived_state="T")
+        return tables.tree_sequence()
+
+    @pytest.mark.parametrize(("start", "end"), [(0, 4), (1, 3), (0, 1), (3, 4)])
+    def test_output_slice(self, single_tree, start, end):
+        indexes = matching.MatcherIndexes(single_tree)
+        rho = np.full(single_tree.num_sites, 1e-9)
+        mu = np.zeros(single_tree.num_sites)
+        matcher = matching.AncestorMatcher(indexes, rho, mu)
+        h = np.ones(single_tree.num_sites, dtype=np.int8)
+        match_out = np.full(single_tree.num_sites, -9, dtype=np.int8)
+        left, right, parent = matcher.find_path(h, start, end, match_out)
+        np.testing.assert_array_equal(match_out[start:end], h[start:end])
+        np.testing.assert_array_equal(match_out[:start], -9)
+        np.testing.assert_array_equal(match_out[end:], -9)
+        np.testing.assert_array_equal(left, [0 if start == 0 else 10 * (start + 1)])
+        np.testing.assert_array_equal(right, [100 if end == 4 else 10 * (end + 1)])
+        np.testing.assert_array_equal(parent, [2])
+
     def test_optional_kwargs(self):
         ts = tskit.Tree.generate_balanced(4).tree_sequence
         tables = ts.dump_tables()
@@ -1467,3 +1493,98 @@ class TestAncestorMatcherWrapper:
             mi, r, m, likelihood_threshold=1e-10, weight_by_n=False
         )
         assert am is not None
+
+
+class TestRegionalMatching:
+    @pytest.fixture(params=[0, 15])
+    def reference(self, request):
+        tables = tskit.TableCollection(100)
+        for time in [5, 4, 3, 2, 1]:
+            tables.nodes.add_row(time=time)
+        for left in range(0, 100, 10):
+            root = (left // 10) % 2 + 1
+            tables.edges.add_row(left, left + 10, 0, root)
+            for child in [3, 4]:
+                tables.edges.add_row(left, left + 10, root, child)
+        positions = [request.param, 20, 21, 25, 45, 60, 61, 75, 95]
+        for j, position in enumerate(positions):
+            site = tables.sites.add_row(position=position, ancestral_state="A")
+            tables.mutations.add_row(site=site, node=j % 2 + 3, derived_state="T")
+        tables.sort()
+        return tables.tree_sequence()
+
+    @pytest.fixture
+    def indexes(self, reference):
+        return matching.MatcherIndexes(reference, vestigial_root=False)
+
+    @pytest.fixture
+    def matcher(self, reference, indexes):
+        rho = np.full(reference.num_sites, 1e-3)
+        mu = np.zeros(reference.num_sites)
+        return matching.AncestorMatcher(indexes, rho, mu)
+
+    def test_all_regions(self, reference, matcher):
+        positions = np.append(reference.sites_position, reference.sequence_length)
+        # A derived call at every site forces alternating copying parents.
+        # This also checks cursor handoff through trees without observations.
+        for start in reversed(range(reference.num_sites)):
+            for end in range(start + 1, reference.num_sites + 1):
+                h = np.full(reference.num_sites, 7, dtype=np.int8)
+                h[start:end] = 1
+                match_out = np.full(reference.num_sites, -9, dtype=np.int8)
+                left, right, parent = matcher.find_path(h, start, end, match_out)
+                expected_left = positions[start:end].copy()
+                if start == 0:
+                    expected_left[0] = 0
+                expected_right = positions[start + 1 : end + 1]
+                site_ids = np.arange(start, end)
+                expected_parent = site_ids % 2 + 3
+                np.testing.assert_array_equal(left, expected_left[::-1])
+                np.testing.assert_array_equal(right, expected_right[::-1])
+                np.testing.assert_array_equal(parent, expected_parent[::-1])
+                np.testing.assert_array_equal(match_out[start:end], 1)
+                np.testing.assert_array_equal(match_out[:start], -9)
+                np.testing.assert_array_equal(match_out[end:], -9)
+
+    @pytest.mark.parametrize("missing", [False, True])
+    def test_outside_observations_and_reuse(self, reference, indexes, matcher, missing):
+        rng = np.random.default_rng(1234)
+        regions = [(start, end) for start in range(9) for end in range(start + 1, 10)]
+        rng.shuffle(regions)
+        rho = np.full(reference.num_sites, 1e-3)
+        mu = np.zeros(reference.num_sites)
+        for start, end in regions:
+            h = np.ones(reference.num_sites, dtype=np.int8)
+            if missing:
+                h[::3] = tskit.MISSING_DATA
+            fresh = matching.AncestorMatcher(indexes, rho, mu)
+            expected = np.full(reference.num_sites, -9, dtype=np.int8)
+            expected_path = fresh.find_path(h, start, end, expected)
+            for outside in [0, 1, tskit.MISSING_DATA, 7]:
+                changed = h.copy()
+                changed[:start] = outside
+                changed[end:] = outside
+                observed = np.full(reference.num_sites, -9, dtype=np.int8)
+                path = matcher.find_path(changed, start, end, observed)
+                for actual, wanted in zip(path, expected_path):
+                    np.testing.assert_array_equal(actual, wanted)
+                np.testing.assert_array_equal(observed, expected)
+
+    def test_match_impossible_is_regional(self, reference):
+        tables = reference.dump_tables()
+        tables.mutations.clear()
+        indexes = matching.MatcherIndexes(tables.tree_sequence(), vestigial_root=False)
+        rho = np.full(reference.num_sites, 1e-3)
+        mu = np.zeros(reference.num_sites)
+        matcher = matching.AncestorMatcher(indexes, rho, mu)
+        h = np.zeros(reference.num_sites, dtype=np.int8)
+        h[4] = 1
+        match_out = np.full(reference.num_sites, -9, dtype=np.int8)
+        matcher.find_path(h, 0, 4, match_out)
+        matcher.find_path(h, 5, 9, match_out)
+        with pytest.raises(_tsinfer.MatchImpossible):
+            matcher.find_path(h, 4, 5, match_out)
+        # Resetting the matcher after an error must also allow another region.
+        matcher.find_path(h, 2, 3, match_out)
+        assert match_out[2] == 0
+        assert match_out[4] == -9
