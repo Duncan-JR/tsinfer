@@ -741,24 +741,6 @@ class TestIterGenotypes:
 
 
 class TestInferAncestorsFormat:
-    @pytest.mark.parametrize("ancestral_index", [0, 1])
-    @pytest.mark.parametrize("missing", [False, True])
-    def test_singletons_excluded(self, ancestral_index, missing):
-        genotypes = np.array([[0, 1, 1, 0], [0, 0, 1, 0], [1, 1, 1, 0]], dtype=np.int8)
-        if ancestral_index == 1:
-            genotypes = 1 - genotypes
-        if missing:
-            genotypes[1, 0] = -1
-        alleles = ["A", "T"] if ancestral_index == 0 else ["T", "A"]
-        store = _haploid_store(
-            genotypes,
-            positions=[100, 200, 300],
-            alleles=[alleles] * 3,
-            anc_states=["A"] * 3,
-        )
-        anc = ancestors.infer_ancestors(_src(store), _cfg(), _anc_state(store))
-        np.testing.assert_array_equal(anc["variant_position"][:], [100, 300])
-
     def test_positions_are_inference_sites_only(self):
         # Site 1 is fixed → not an inference site
         gt = _haploid_store(

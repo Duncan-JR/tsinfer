@@ -1142,25 +1142,6 @@ def _run_pipeline_no_augment(sample_store):
 
 
 class TestAugmentSites:
-    def test_restores_excluded_singletons(self):
-        genotypes = np.array(
-            [[[0], [1], [1]], [[0], [0], [1]], [[1], [0], [1]]], dtype=np.int8
-        )
-        store = helpers.make_sample_vcz(
-            genotypes,
-            positions=[100, 200, 300],
-            alleles=[["A", "T"]] * 3,
-            ancestral_state=["A"] * 3,
-            sequence_length=1000,
-        )
-        ts, cfg = _run_pipeline_no_augment(store)
-        np.testing.assert_array_equal(ts.sites_position, [100, 300])
-
-        cfg.augment_sites = config.AugmentSitesConfig(sources=["test"])
-        augmented = pipeline.augment_sites(ts, cfg)
-        np.testing.assert_array_equal(augmented.sites_position, [100, 200, 300])
-        np.testing.assert_array_equal(augmented.genotype_matrix(), genotypes[:, :, 0])
-
     def _make_two_stores(self):
         """
         Create two VCZ stores from a simulation:

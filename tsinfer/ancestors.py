@@ -79,7 +79,7 @@ def _assign_site_intervals(positions, intervals):
 def _compute_site_stats(genotype_iter, num_sites, num_haplotypes, progress=False):
     """
     Pass 1: iterate over inference-site genotypes, compute derived genotype
-    stats for each site, filter out singletons, fixed and all-missing sites.
+    stats for each site, filter out fixed/all-missing.
 
     Returns (keep_mask, times) where:
     - keep_mask: boolean array of length num_sites
@@ -100,7 +100,7 @@ def _compute_site_stats(genotype_iter, num_sites, num_haplotypes, progress=False
         derived_count = int(np.sum(derived_gt == 1))
         n_non_missing = int(np.sum(derived_gt >= 0))
 
-        if derived_count <= 1 or derived_count == n_non_missing:
+        if n_non_missing == 0 or derived_count == 0 or derived_count == n_non_missing:
             continue
 
         keep_mask[i] = True
@@ -266,7 +266,7 @@ def _apply_site_stats(genotype_iter, inf_sites, num_haplotypes, progress):
     num_dropped = len(inf_sites.positions) - num_inf
     elapsed = time.monotonic() - t0
     logger.info(
-        "Pass 1 complete: %d sites kept, %d dropped (singleton, fixed or all-missing)"
+        "Pass 1 complete: %d sites kept, %d dropped (fixed or all-missing)"
         " in %.1fs (RSS=%.1fMiB)",
         num_inf,
         num_dropped,
