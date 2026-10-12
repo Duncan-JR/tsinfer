@@ -1631,6 +1631,158 @@ test_matching_nonzero_root_valid(void)
 }
 
 static void
+check_matching_regions(const tsk_treeseq_t *ts)
+{
+    int ret;
+    ancestor_matcher_t am;
+    matcher_indexes_t mi;
+    tsk_tree_t tree;
+    size_t path_length;
+    const tsk_id_t num_sites = (tsk_id_t) tsk_treeseq_get_num_sites(ts);
+    const tsk_id_t num_nodes = (tsk_id_t) tsk_treeseq_get_num_nodes(ts);
+    const double sequence_length = tsk_treeseq_get_sequence_length(ts);
+    allele_t h[9], match[9];
+    tsk_id_t left[9], right[9], parent[9];
+    double rho[9], mu[9];
+    tsk_id_t start, end, site, u, child, previous;
+
+    CU_ASSERT_TRUE_FATAL(num_sites <= 9);
+    for (site = 0; site < num_sites; site++) {
+        rho[site] = 1e-3;
+        mu[site] = 0;
+    }
+    ret = matcher_indexes_alloc(&mi, ts->tables, NULL, 0);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    ret = ancestor_matcher_alloc(&am, &mi, rho, mu, DBL_MIN, TSI_EXTENDED_CHECKS);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    memset(am.max_likelihood_node, 0xff, am.num_sites * sizeof(*am.max_likelihood_node));
+    ret = tsk_tree_init(&tree, ts, 0);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+
+    /* Descending starts exercise reuse after both later and earlier matches. */
+    for (start = num_sites - 1; start >= 0; start--) {
+        for (end = start + 1; end <= num_sites; end++) {
+            memset(h, 7, sizeof(h));
+            memset(match, 7, sizeof(match));
+            for (site = start; site < end; site++) {
+                h[site] = ts->tables->mutations.num_rows == 0 ? 0 : 1;
+            }
+            ret = ancestor_matcher_find_path(
+                &am, start, end, h, match, &path_length, left, right, parent);
+            CU_ASSERT_EQUAL_FATAL(ret, 0);
+            CU_ASSERT_TRUE_FATAL(path_length > 0);
+            CU_ASSERT_EQUAL(
+                left[path_length - 1], start == 0 ? 0 : mi.sites.position[start]);
+            CU_ASSERT_EQUAL(
+                right[0], end == num_sites ? sequence_length : mi.sites.position[end]);
+            for (site = 0; site < num_sites; site++) {
+                CU_ASSERT_EQUAL(match[site], start <= site && site < end ? h[site] : 7);
+                CU_ASSERT_EQUAL(am.max_likelihood_node[site], TSK_NULL);
+                CU_ASSERT_EQUAL(am.traceback[site].size, 0);
+            }
+
+            /* Traceback stops in the tree containing the first observation. */
+            ret = tsk_tree_seek(&tree, mi.sites.position[start], 0);
+            CU_ASSERT_EQUAL_FATAL(ret, 0);
+            for (u = 0; u < num_nodes; u++) {
+                CU_ASSERT_EQUAL(am.parent[u], tree.parent[u]);
+            }
+
+            /* Forward child/sibling state stops at the last observation, even
+             * when several unobserved trees precede the output right endpoint. */
+            ret = tsk_tree_seek(&tree, mi.sites.position[end - 1], 0);
+            CU_ASSERT_EQUAL_FATAL(ret, 0);
+            for (u = 0; u < num_nodes; u++) {
+                previous = TSK_NULL;
+                child = am.left_child[u];
+                while (child != TSK_NULL) {
+                    CU_ASSERT_EQUAL_FATAL(tree.parent[child], u);
+                    CU_ASSERT_EQUAL(am.left_sib[child], previous);
+                    previous = child;
+                    child = am.right_sib[child];
+                }
+                CU_ASSERT_EQUAL(am.right_child[u], previous);
+                if (tree.parent[u] != TSK_NULL) {
+                    child = am.left_child[tree.parent[u]];
+                    while (child != TSK_NULL && child != u) {
+                        child = am.right_sib[child];
+                    }
+                    CU_ASSERT_EQUAL(child, u);
+                }
+            }
+        }
+    }
+    tsk_tree_free(&tree);
+    ancestor_matcher_free(&am);
+    matcher_indexes_free(&mi);
+}
+
+static void
+test_matching_regions(void)
+{
+    int ret;
+    tsk_id_t j, root, site;
+    const double positions[] = { 15, 20, 21, 25, 45, 60, 61, 75, 95 };
+    tsk_table_collection_t tables;
+    tsk_treeseq_t ts;
+
+    check_matching_regions(&_single_tree_ex_ts);
+    check_matching_regions(&_multi_tree_ex_ts);
+
+    ret = tsk_table_collection_init(&tables, 0);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    tables.sequence_length = 100;
+    for (j = 0; j < 5; j++) {
+        tsk_node_table_add_row(&tables.nodes, 0, 5 - j, TSK_NULL, TSK_NULL, NULL, 0);
+    }
+    /* Alternate roots and donor parents, including unobserved leading and
+     * trailing trees and observations exactly at edge boundaries. */
+    for (j = 0; j < 10; j++) {
+        root = j % 2 + 1;
+        tsk_edge_table_add_row(&tables.edges, 10 * j, 10 * (j + 1), 0, root, NULL, 0);
+        tsk_edge_table_add_row(&tables.edges, 10 * j, 10 * (j + 1), root, 3, NULL, 0);
+        tsk_edge_table_add_row(&tables.edges, 10 * j, 10 * (j + 1), root, 4, NULL, 0);
+    }
+    for (j = 0; j < 9; j++) {
+        site = tsk_site_table_add_row(&tables.sites, positions[j], "A", 1, NULL, 0);
+        tsk_mutation_table_add_row(&tables.mutations, site, j % 2 + 3, TSK_NULL,
+            TSK_UNKNOWN_TIME, "T", 1, NULL, 0);
+    }
+    ret = tsk_table_collection_sort(&tables, NULL, 0);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    ret = tsk_treeseq_init(&ts, &tables, TSK_TS_INIT_BUILD_INDEXES);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    check_matching_regions(&ts);
+    tsk_treeseq_free(&ts);
+
+    /* Nonempty indexes can also be exhausted before the requested region. */
+    tsk_edge_table_clear(&tables.edges);
+    for (j = 0; j < 8; j++) {
+        root = j % 2 + 1;
+        tsk_edge_table_add_row(&tables.edges, 10 * j, 10 * (j + 1), 0, root, NULL, 0);
+        tsk_edge_table_add_row(&tables.edges, 10 * j, 10 * (j + 1), root, 3, NULL, 0);
+        tsk_edge_table_add_row(&tables.edges, 10 * j, 10 * (j + 1), root, 4, NULL, 0);
+    }
+    tables.mutations.node[8] = 0;
+    ret = tsk_table_collection_sort(&tables, NULL, 0);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    ret = tsk_treeseq_init(&ts, &tables, TSK_TS_INIT_BUILD_INDEXES);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    check_matching_regions(&ts);
+    tsk_treeseq_free(&ts);
+
+    /* Empty edge arrays exercise both forward exhaustion and reverse -1
+     * sentinels; node 0 is the only possible copying parent. */
+    tsk_edge_table_clear(&tables.edges);
+    tsk_mutation_table_clear(&tables.mutations);
+    ret = tsk_treeseq_init(&ts, &tables, TSK_TS_INIT_BUILD_INDEXES);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    check_matching_regions(&ts);
+    tsk_treeseq_free(&ts);
+    tsk_table_collection_free(&tables);
+}
+
+static void
 test_strerror(void)
 {
     int j;
@@ -1770,6 +1922,7 @@ main(int argc, char **argv)
         { "test_matching_impossible_zero_recomb", test_matching_impossible_zero_recomb },
         { "test_matching_root_switch", test_matching_root_switch },
         { "test_matching_nonzero_root_valid", test_matching_nonzero_root_valid },
+        { "test_matching_regions", test_matching_regions },
 
         { "test_strerror", test_strerror },
 

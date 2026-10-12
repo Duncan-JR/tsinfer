@@ -858,14 +858,13 @@ ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_
     tsk_id_t site;
     edge_t edge;
     tsk_id_t u, v, max_likelihood_node;
-    coordinate_t left, right, pos, start_pos, end_pos;
+    coordinate_t left, right, pos, start_pos, end_pos, last_pos;
     tsk_id_t *restrict parent = self->parent;
     allele_t *restrict allelic_state = self->allelic_state;
     int8_t *restrict recombination_required = self->recombination_required;
     const edge_t *restrict in = self->matcher_indexes->right_index_edges;
     const edge_t *restrict out = self->matcher_indexes->left_index_edges;
     const coordinate_t *restrict sites_position = self->matcher_indexes->sites.position;
-    const coordinate_t sequence_length = sites_position[self->num_sites];
     int_fast32_t in_index = (int_fast32_t) self->matcher_indexes->num_edges - 1;
     int_fast32_t out_index = (int_fast32_t) self->matcher_indexes->num_edges - 1;
     size_t path_length = 0;
@@ -887,10 +886,23 @@ ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_
     memset(parent, 0xff, self->num_nodes * sizeof(*parent));
     memset(
         recombination_required, 0xff, self->num_nodes * sizeof(*recombination_required));
-    pos = sequence_length;
-    site = (tsk_id_t) self->num_sites - 1;
+    site = end - 1;
+    last_pos = sites_position[site];
+    /* Install only edges active at the last observation. Later topology
+     * events, including those before end_pos, are irrelevant to traceback. */
+    while (in_index >= 0 && in[in_index].right > last_pos) {
+        edge = in[in_index];
+        if (edge.left <= last_pos) {
+            parent[edge.child] = edge.parent;
+        }
+        in_index--;
+    }
+    while (out_index >= 0 && out[out_index].left > last_pos) {
+        out_index--;
+    }
+    pos = end_pos;
 
-    while (pos > start_pos) {
+    while (site >= start) {
         while (out_index >= 0 && out[out_index].left == pos) {
             edge = out[out_index];
             out_index--;
@@ -913,7 +925,8 @@ ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_
 
         /* The tree is ready; perform the traceback at each site in this tree */
         assert(left < right);
-        for (; site >= 0 && left <= sites_position[site] && sites_position[site] < right;
+        for (; site >= start && left <= sites_position[site]
+               && sites_position[site] < right;
             site--) {
             if (start_pos <= sites_position[site] && sites_position[site] < end_pos) {
 
@@ -979,7 +992,7 @@ ancestor_matcher_run_forwards_match(
     tsk_id_t *restrict right_child = self->right_child;
     tsk_id_t *restrict left_sib = self->left_sib;
     tsk_id_t *restrict right_sib = self->right_sib;
-    coordinate_t pos, left, right;
+    coordinate_t left, right;
     const edge_t *restrict in = self->matcher_indexes->left_index_edges;
     const edge_t *restrict out = self->matcher_indexes->right_index_edges;
     const int_fast32_t M = (tsk_id_t) self->matcher_indexes->num_edges;
@@ -990,37 +1003,26 @@ ancestor_matcher_run_forwards_match(
     const coordinate_t sequence_length = sites_position[self->num_sites];
 
     /* Load the tree for start */
-    left = 0;
-    pos = 0;
     in_index = 0;
     out_index = 0;
-    right = sequence_length;
-    if (in_index < M && start_pos < in[in_index].left) {
-        right = in[in_index].left;
-    }
-
-    /* TODO don't add all edges trees but only insert edges that intersect
-     * with start_pos. Maybe a reasonable gain for short ancestral fragments */
-    while (in_index < M && out_index < M && in[in_index].left <= start_pos) {
-        while (out_index < M && out[out_index].right == pos) {
-            remove_edge(
-                out[out_index], parent, left_child, right_child, left_sib, right_sib);
-            out_index++;
-        }
-        while (in_index < M && in[in_index].left == pos) {
+    while (in_index < M && in[in_index].left <= start_pos) {
+        if (in[in_index].right > start_pos) {
             insert_edge(
                 in[in_index], parent, left_child, right_child, left_sib, right_sib);
-            in_index++;
         }
-        left = pos;
-        right = sequence_length;
-        if (in_index < M) {
-            right = TSK_MIN(right, in[in_index].left);
-        }
-        if (out_index < M) {
-            right = TSK_MIN(right, out[out_index].right);
-        }
-        pos = right;
+        in_index++;
+    }
+    /* Expired edges were never installed, so skip their removal events. */
+    while (out_index < M && out[out_index].right <= start_pos) {
+        out_index++;
+    }
+    left = start_pos;
+    right = sequence_length;
+    if (in_index < M) {
+        right = TSK_MIN(right, in[in_index].left);
+    }
+    if (out_index < M) {
+        right = TSK_MIN(right, out[out_index].right);
     }
 
     /* Insert the initial likelihoods. All non-zero roots are marked with a
@@ -1046,8 +1048,7 @@ ancestor_matcher_run_forwards_match(
     self->likelihood_nodes[0] = last_root;
     self->num_likelihood_nodes = 1;
 
-    for (site = 0; sites_position[site] < left; site++)
-        ;
+    site = start;
 
     remove_start = out_index;
     while (left < end_pos) {
@@ -1093,7 +1094,7 @@ ancestor_matcher_run_forwards_match(
             ancestor_matcher_check_state(self);
         }
 
-        while (left <= sites_position[site]
+        while (site < end && left <= sites_position[site]
                && sites_position[site] < TSK_MIN(right, end_pos)) {
             ret = ancestor_matcher_update_site_state(
                 self, site, haplotype[site], parent, L, L_cache);
@@ -1101,6 +1102,9 @@ ancestor_matcher_run_forwards_match(
                 goto out;
             }
             site++;
+        }
+        if (site == end) {
+            break;
         }
 
         /* Move on to the next tree */

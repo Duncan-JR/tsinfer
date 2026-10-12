@@ -428,6 +428,10 @@ class AncestorMatcher(_tsinfer.AncestorMatcher):
         )
 
     def find_path(self, h, start, end, match_out):
+        """Match ``h[start:end]`` and write only ``match_out[start:end]``.
+
+        Values outside the requested slice of ``match_out`` remain unchanged.
+        """
         path_len, left, right, parent, matched = super().find_path(h, start, end)
-        match_out[:] = matched
+        match_out[start:end] = matched[start:end]
         return left[:path_len], right[:path_len], parent[:path_len]
