@@ -1494,6 +1494,25 @@ class TestAncestorMatcherWrapper:
         )
         assert am is not None
 
+    @pytest.mark.parametrize(("start", "end"), [(1, 2), (0, 4)])
+    def test_native_path_capacity(self, single_tree, start, end):
+        indexes = matching.MatcherIndexes(single_tree)
+        rho = np.full(single_tree.num_sites, 1e-9)
+        mu = np.zeros(single_tree.num_sites)
+        matcher = _tsinfer.AncestorMatcher(indexes, rho, mu)
+        h = np.ones(single_tree.num_sites, dtype=np.int8)
+        length, left, right, parent, matched = matcher.find_path(h, start, end)
+        assert length == 1
+        for array, dtype in [(left, np.uint32), (right, np.uint32), (parent, np.int32)]:
+            assert array.shape == (end - start,)
+            assert array.dtype == dtype
+        assert matched.shape == (single_tree.num_sites,)
+        assert matched.dtype == np.int8
+        np.testing.assert_array_equal(left[:length], [0 if start == 0 else 20])
+        np.testing.assert_array_equal(right[:length], [100 if end == 4 else 30])
+        np.testing.assert_array_equal(parent[:length], [2])
+        np.testing.assert_array_equal(matched[start:end], h[start:end])
+
 
 class TestRegionalMatching:
     @pytest.fixture(params=[False, True])
