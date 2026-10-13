@@ -51,6 +51,7 @@
 
 #define TSI_EXTENDED_CHECKS     1
 #define TSI_DISABLE_WEIGHT_BY_N 2
+#define TSI_REUSE_TOPOLOGY      4
 
 #define TSI_GENOTYPE_ENCODING_ONE_BIT 1
 
@@ -195,6 +196,11 @@ typedef struct {
     tsk_id_t *right_child;
     tsk_id_t *left_sib;
     tsk_id_t *right_sib;
+    /* Topology at the final processed site; cursors point to the next events. */
+    coordinate_t topology_position;
+    int_fast32_t forward_insertion;
+    int_fast32_t forward_removal;
+    bool topology_valid;
     double *likelihood;
     double *likelihood_cache;
     allele_t *allelic_state;
@@ -203,7 +209,9 @@ typedef struct {
     tsk_id_t *max_likelihood_node;
     /* Used during traceback to map nodes where recombination is required. */
     int8_t *recombination_required;
-    tsk_id_t *likelihood_nodes_tmp;
+    /* Forward coalescing paths, then reverse parent links during traceback.
+     * These lifetimes do not overlap. */
+    tsk_id_t *node_scratch;
     tsk_id_t *likelihood_nodes;
     node_state_list_t *traceback;
     tsi_blkalloc_t traceback_allocator;
@@ -233,6 +241,7 @@ int ancestor_matcher_alloc(ancestor_matcher_t *self,
     const matcher_indexes_t *matcher_indexes, double *recombination_rate,
     double *mismatch_rate, double likelihood_threshold, int flags);
 int ancestor_matcher_free(ancestor_matcher_t *self);
+void ancestor_matcher_reset_topology(ancestor_matcher_t *self);
 int ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
     const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
     tsk_id_t *path_left, tsk_id_t *path_right, tsk_id_t *path_parent);

@@ -556,8 +556,10 @@ AncestorMatcher_init(AncestorMatcher *self, PyObject *args, PyObject *kwds)
     int err;
     int extended_checks = 0;
     int weight_by_n = 1;
-    static char *kwlist[] = { "matcher_indexes", "recombination", "mismatch",
-        "extended_checks", "likelihood_threshold", "weight_by_n", NULL };
+    int reuse_topology = 0;
+    static char *kwlist[]
+        = { "matcher_indexes", "recombination", "mismatch", "extended_checks",
+              "likelihood_threshold", "weight_by_n", "reuse_topology", NULL };
     MatcherIndexes *matcher_indexes = NULL;
     PyObject *recombination = NULL;
     PyObject *mismatch = NULL;
@@ -569,9 +571,9 @@ AncestorMatcher_init(AncestorMatcher *self, PyObject *args, PyObject *kwds)
 
     self->ancestor_matcher = NULL;
     self->matcher_indexes = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OO|idi", kwlist, &MatcherIndexesType,
-            &matcher_indexes, &recombination, &mismatch, &extended_checks,
-            &likelihood_threshold, &weight_by_n)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!OO|idip", kwlist,
+            &MatcherIndexesType, &matcher_indexes, &recombination, &mismatch,
+            &extended_checks, &likelihood_threshold, &weight_by_n, &reuse_topology)) {
         goto out;
     }
     self->matcher_indexes = matcher_indexes;
@@ -613,6 +615,9 @@ AncestorMatcher_init(AncestorMatcher *self, PyObject *args, PyObject *kwds)
     if (!weight_by_n) {
         flags |= TSI_DISABLE_WEIGHT_BY_N;
     }
+    if (reuse_topology) {
+        flags |= TSI_REUSE_TOPOLOGY;
+    }
     err = ancestor_matcher_alloc(self->ancestor_matcher,
         self->matcher_indexes->matcher_indexes, PyArray_DATA(recombination_array),
         PyArray_DATA(mismatch_array), likelihood_threshold, flags);
@@ -649,6 +654,10 @@ AncestorMatcher_find_path(AncestorMatcher *self, PyObject *args, PyObject *kwds)
     }
     if (!PyArg_ParseTupleAndKeywords(
             args, kwds, "Oii", kwlist, &haplotype, &start, &end)) {
+        goto out;
+    }
+    if (start < 0 || start >= end || (size_t) end > self->ancestor_matcher->num_sites) {
+        PyErr_SetString(PyExc_ValueError, "Require 0 <= start < end <= num_sites");
         goto out;
     }
     haplotype_array
@@ -701,6 +710,16 @@ out:
     Py_XDECREF(right);
     Py_XDECREF(parent);
     return ret;
+}
+
+static PyObject *
+AncestorMatcher_reset_topology(AncestorMatcher *self, PyObject *Py_UNUSED(args))
+{
+    if (AncestorMatcher_check_state(self) != 0) {
+        return NULL;
+    }
+    ancestor_matcher_reset_topology(self->ancestor_matcher);
+    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -797,6 +816,8 @@ static PyGetSetDef AncestorMatcher_getsetters[] = {
 };
 
 static PyMethodDef AncestorMatcher_methods[] = {
+    { "reset_topology", (PyCFunction) AncestorMatcher_reset_topology, METH_NOARGS,
+        "Clear retained topology without reallocating matcher state." },
     { "find_path", (PyCFunction) AncestorMatcher_find_path, METH_VARARGS | METH_KEYWORDS,
         "Returns a best match path for the specified haplotype through the ancestors." },
     { "get_traceback", (PyCFunction) AncestorMatcher_get_traceback, METH_VARARGS,

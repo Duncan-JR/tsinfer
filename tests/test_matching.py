@@ -830,6 +830,10 @@ class TestAncestorMatcherWrapper:
 
 
 class TestRegionalMatching:
+    @pytest.fixture(params=[False, True])
+    def reuse_topology(self, request):
+        return request.param
+
     @pytest.fixture(params=[0, 15])
     def reference(self, request):
         tables = tskit.TableCollection(100)
@@ -852,10 +856,10 @@ class TestRegionalMatching:
         return matching.MatcherIndexes(reference, vestigial_root=False)
 
     @pytest.fixture
-    def matcher(self, reference, indexes):
+    def matcher(self, reference, indexes, reuse_topology):
         rho = np.full(reference.num_sites, 1e-3)
         mu = np.zeros(reference.num_sites)
-        return matching.AncestorMatcher(indexes, rho, mu)
+        return matching.AncestorMatcher(indexes, rho, mu, reuse_topology=reuse_topology)
 
     def test_all_regions(self, reference, matcher):
         positions = np.append(reference.sites_position, reference.sequence_length)
@@ -904,13 +908,15 @@ class TestRegionalMatching:
                     np.testing.assert_array_equal(actual, wanted)
                 np.testing.assert_array_equal(observed, expected)
 
-    def test_match_impossible_is_regional(self, reference):
+    def test_match_impossible_is_regional(self, reference, reuse_topology):
         tables = reference.dump_tables()
         tables.mutations.clear()
         indexes = matching.MatcherIndexes(tables.tree_sequence(), vestigial_root=False)
         rho = np.full(reference.num_sites, 1e-3)
         mu = np.zeros(reference.num_sites)
-        matcher = matching.AncestorMatcher(indexes, rho, mu)
+        matcher = matching.AncestorMatcher(
+            indexes, rho, mu, reuse_topology=reuse_topology
+        )
         h = np.zeros(reference.num_sites, dtype=np.int8)
         h[4] = 1
         match_out = np.full(reference.num_sites, -9, dtype=np.int8)
@@ -922,3 +928,24 @@ class TestRegionalMatching:
         matcher.find_path(h, 2, 3, match_out)
         assert match_out[2] == 0
         assert match_out[4] == -9
+
+    def test_reset_topology(self, reference, matcher):
+        h = np.ones(reference.num_sites, dtype=np.int8)
+        match_out = np.full(reference.num_sites, -9, dtype=np.int8)
+        expected = matcher.find_path(h, 2, 4, match_out)
+        matcher.find_path(h, 5, 9, match_out)
+        assert matcher.reset_topology() is None
+        actual = matcher.find_path(h, 2, 4, match_out)
+        for observed, wanted in zip(actual, expected):
+            np.testing.assert_array_equal(observed, wanted)
+        np.testing.assert_array_equal(match_out[2:4], 1)
+
+    @pytest.mark.parametrize(
+        ("start", "end"), [(-1, 1), (0, 0), (2, 1), (0, 10), (9, 10), (0, -1)]
+    )
+    def test_invalid_bounds(self, reference, matcher, start, end):
+        h = np.ones(reference.num_sites, dtype=np.int8)
+        match_out = np.full(reference.num_sites, -9, dtype=np.int8)
+        with pytest.raises(ValueError, match="0 <= start < end <= num_sites"):
+            matcher.find_path(h, start, end, match_out)
+        np.testing.assert_array_equal(match_out, -9)

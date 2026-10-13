@@ -405,7 +405,13 @@ class MatcherIndexes(_tsinfer.MatcherIndexes):
 
 
 class AncestorMatcher(_tsinfer.AncestorMatcher):
-    """Wrapper with the same ``find_path`` API as ``AncestorMatcher``."""
+    """Match independent regions, optionally retaining reference topology.
+
+    With ``reuse_topology=True``, ordered calls advance from the tree at the
+    previous region's final processed site. Each call starts fresh likelihoods.
+    Earlier requests initialise the tree again. Call ``reset_topology()`` to
+    begin a new traversal without reallocating the matcher.
+    """
 
     def __init__(
         self,
@@ -414,6 +420,8 @@ class AncestorMatcher(_tsinfer.AncestorMatcher):
         mismatch,
         likelihood_threshold=None,
         weight_by_n=None,
+        *,
+        reuse_topology=False,
     ):
         kwargs = {}
         if likelihood_threshold is not None:
@@ -424,6 +432,7 @@ class AncestorMatcher(_tsinfer.AncestorMatcher):
             matcher_indexes,
             recombination=recombination,
             mismatch=mismatch,
+            reuse_topology=reuse_topology,
             **kwargs,
         )
 
