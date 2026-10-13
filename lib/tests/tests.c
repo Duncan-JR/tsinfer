@@ -1737,7 +1737,7 @@ test_matching_nonzero_root_valid(void)
 }
 
 static void
-check_matching_regions(const tsk_treeseq_t *ts)
+check_matching_regions_mode(const tsk_treeseq_t *ts, int flags)
 {
     int ret;
     ancestor_matcher_t am;
@@ -1750,7 +1750,7 @@ check_matching_regions(const tsk_treeseq_t *ts)
     allele_t h[9], match[9];
     tsk_id_t left[9], right[9], parent[9];
     double rho[9], mu[9];
-    tsk_id_t start, end, site, u, child, previous;
+    tsk_id_t start, end, site, u, child, previous, pass, last_end;
 
     CU_ASSERT_TRUE_FATAL(num_sites <= 9);
     for (site = 0; site < num_sites; site++) {
@@ -1759,15 +1759,19 @@ check_matching_regions(const tsk_treeseq_t *ts)
     }
     ret = matcher_indexes_alloc(&mi, ts->tables, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
-    ret = ancestor_matcher_alloc(&am, &mi, rho, mu, DBL_MIN, TSI_EXTENDED_CHECKS);
+    ret = ancestor_matcher_alloc(
+        &am, &mi, rho, mu, DBL_MIN, flags | TSI_EXTENDED_CHECKS);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     memset(am.max_likelihood_node, 0xff, am.num_sites * sizeof(*am.max_likelihood_node));
     ret = tsk_tree_init(&tree, ts, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
-    /* Descending starts exercise reuse after both later and earlier matches. */
-    for (start = num_sites - 1; start >= 0; start--) {
-        for (end = start + 1; end <= num_sites; end++) {
+    /* Try all regions backwards, then single sites forwards through exhausted
+     * indexes and zero-edge references as well as ordinary trees. */
+    for (pass = 0; pass < 2 * num_sites; pass++) {
+        start = pass < num_sites ? num_sites - pass - 1 : pass - num_sites;
+        last_end = pass < num_sites ? num_sites : start + 1;
+        for (end = start + 1; end <= last_end; end++) {
             memset(h, 7, sizeof(h));
             memset(match, 7, sizeof(match));
             for (site = start; site < end; site++) {
@@ -1787,8 +1791,9 @@ check_matching_regions(const tsk_treeseq_t *ts)
                 CU_ASSERT_EQUAL(am.traceback[site].size, 0);
             }
 
-            /* Traceback stops in the tree containing the first observation. */
-            ret = tsk_tree_seek(&tree, mi.sites.position[start], 0);
+            /* Default traceback rewinds parents; reuse preserves the endpoint. */
+            site = flags & TSI_REUSE_TOPOLOGY ? end - 1 : start;
+            ret = tsk_tree_seek(&tree, mi.sites.position[site], 0);
             CU_ASSERT_EQUAL_FATAL(ret, 0);
             for (u = 0; u < num_nodes; u++) {
                 CU_ASSERT_EQUAL(am.parent[u], tree.parent[u]);
@@ -1820,6 +1825,127 @@ check_matching_regions(const tsk_treeseq_t *ts)
     }
     tsk_tree_free(&tree);
     ancestor_matcher_free(&am);
+    matcher_indexes_free(&mi);
+}
+
+static void
+check_matching_regions(const tsk_treeseq_t *ts)
+{
+    check_matching_regions_mode(ts, 0);
+    check_matching_regions_mode(ts, TSI_REUSE_TOPOLOGY);
+}
+
+static void
+check_matching_topology_reuse(const tsk_treeseq_t *ts)
+{
+    int ret, j;
+    const tsk_id_t starts[] = { 0, 2, 5, 8, 1, 5, 0, 5 };
+    const tsk_id_t ends[] = { 1, 4, 7, 9, 4, 9, 9, 9 };
+    ancestor_matcher_t am, independent;
+    matcher_indexes_t mi;
+    size_t length, expected_length, k;
+    tsk_id_t left[9], right[9], parent[9];
+    tsk_id_t expected_left[9], expected_right[9], expected_parent[9];
+    allele_t h[9], match[9], expected_match[9];
+    double rho[9], mu[9];
+    int_fast32_t previous_in, previous_out;
+    coordinate_t previous_position;
+    bool was_valid;
+
+    for (j = 0; j < 9; j++) {
+        rho[j] = 1e-3;
+        mu[j] = 0;
+        h[j] = 1;
+    }
+    ret = matcher_indexes_alloc(&mi, ts->tables, NULL, 0);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    ret = ancestor_matcher_alloc(
+        &am, &mi, rho, mu, DBL_MIN, TSI_EXTENDED_CHECKS | TSI_REUSE_TOPOLOGY);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    ret = ancestor_matcher_alloc(
+        &independent, &mi, rho, mu, DBL_MIN, TSI_EXTENDED_CHECKS);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+
+    for (j = 0; j < 8; j++) {
+        if (j == 5) {
+            ancestor_matcher_reset_topology(&am);
+            CU_ASSERT_FALSE(am.topology_valid);
+            CU_ASSERT_EQUAL(am.forward_insertion, 0);
+            CU_ASSERT_EQUAL(am.forward_removal, 0);
+            for (k = 0; k < am.num_nodes; k++) {
+                CU_ASSERT_EQUAL(am.parent[k], TSK_NULL);
+                CU_ASSERT_EQUAL(am.left_child[k], TSK_NULL);
+                CU_ASSERT_EQUAL(am.right_child[k], TSK_NULL);
+                CU_ASSERT_EQUAL(am.left_sib[k], TSK_NULL);
+                CU_ASSERT_EQUAL(am.right_sib[k], TSK_NULL);
+            }
+        }
+        previous_in = am.forward_insertion;
+        previous_out = am.forward_removal;
+        previous_position = am.topology_position;
+        was_valid = am.topology_valid;
+        memset(match, 7, sizeof(match));
+        memset(expected_match, 7, sizeof(expected_match));
+        if (j == 6) {
+            /* Fail after several traceback records have been allocated. */
+            h[4] = 7;
+        }
+        ret = ancestor_matcher_find_path(
+            &am, starts[j], ends[j], h, match, &length, left, right, parent);
+        if (j == 6) {
+            CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_HAPLOTYPE_ALLELE);
+            CU_ASSERT_FALSE(am.topology_valid);
+            for (k = 0; k < am.num_sites; k++) {
+                CU_ASSERT_EQUAL(am.traceback[k].size, 0);
+                CU_ASSERT_PTR_NULL(am.traceback[k].node);
+                CU_ASSERT_PTR_NULL(am.traceback[k].recombination_required);
+                CU_ASSERT_EQUAL(am.max_likelihood_node[k], TSK_NULL);
+            }
+            h[4] = 1;
+            continue;
+        }
+        CU_ASSERT_EQUAL_FATAL(ret, 0);
+        ret = ancestor_matcher_find_path(&independent, starts[j], ends[j], h,
+            expected_match, &expected_length, expected_left, expected_right,
+            expected_parent);
+        CU_ASSERT_EQUAL_FATAL(ret, 0);
+        CU_ASSERT_EQUAL_FATAL(length, expected_length);
+        CU_ASSERT_EQUAL(length, ends[j] - starts[j]);
+        for (k = 0; k < length; k++) {
+            CU_ASSERT_EQUAL(left[k], expected_left[k]);
+            CU_ASSERT_EQUAL(right[k], expected_right[k]);
+            CU_ASSERT_EQUAL(parent[k], expected_parent[k]);
+            CU_ASSERT_EQUAL(parent[k], (ends[j] - 1 - (tsk_id_t) k) % 2 + 3);
+        }
+        CU_ASSERT_EQUAL(memcmp(match, expected_match, sizeof(match)), 0);
+        CU_ASSERT_TRUE(am.topology_valid);
+        CU_ASSERT_EQUAL(am.topology_position, mi.sites.position[ends[j] - 1]);
+        if (was_valid && mi.sites.position[starts[j]] >= previous_position) {
+            CU_ASSERT_TRUE(am.forward_insertion >= previous_in);
+            CU_ASSERT_TRUE(am.forward_removal >= previous_out);
+        }
+        if (am.forward_insertion < (int_fast32_t) mi.num_edges) {
+            CU_ASSERT_TRUE(
+                mi.left_index_edges[am.forward_insertion].left > am.topology_position);
+        }
+        if (am.forward_removal < (int_fast32_t) mi.num_edges) {
+            CU_ASSERT_TRUE(
+                mi.right_index_edges[am.forward_removal].right > am.topology_position);
+        }
+        ret = ancestor_matcher_find_path(&independent, ends[j] - 1, ends[j], h,
+            expected_match, &expected_length, expected_left, expected_right,
+            expected_parent);
+        CU_ASSERT_EQUAL_FATAL(ret, 0);
+        for (k = 0; k < am.num_nodes; k++) {
+            CU_ASSERT_EQUAL(am.parent[k], independent.parent[k]);
+            CU_ASSERT_EQUAL(am.left_child[k], independent.left_child[k]);
+            CU_ASSERT_EQUAL(am.right_child[k], independent.right_child[k]);
+            CU_ASSERT_EQUAL(am.left_sib[k], independent.left_sib[k]);
+            CU_ASSERT_EQUAL(am.right_sib[k], independent.right_sib[k]);
+        }
+    }
+    ancestor_matcher_free(&am);
+    ancestor_matcher_free(&independent);
     matcher_indexes_free(&mi);
 }
 
@@ -1859,6 +1985,7 @@ test_matching_regions(void)
     ret = tsk_treeseq_init(&ts, &tables, TSK_TS_INIT_BUILD_INDEXES);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     check_matching_regions(&ts);
+    check_matching_topology_reuse(&ts);
     tsk_treeseq_free(&ts);
 
     /* Nonempty indexes can also be exhausted before the requested region. */

@@ -424,8 +424,7 @@ ancestor_matcher_alloc(ancestor_matcher_t *self,
         = malloc(self->num_nodes * sizeof(*self->recombination_required));
     self->likelihood_cache = malloc(self->num_nodes * sizeof(*self->likelihood_cache));
     self->likelihood_nodes = malloc(self->num_nodes * sizeof(*self->likelihood_nodes));
-    self->likelihood_nodes_tmp
-        = malloc(self->num_nodes * sizeof(*self->likelihood_nodes_tmp));
+    self->node_scratch = malloc(self->num_nodes * sizeof(*self->node_scratch));
 
     if (self->recombination_rate == NULL || self->mismatch_rate == NULL
         || self->traceback == NULL || self->max_likelihood_node == NULL
@@ -433,7 +432,7 @@ ancestor_matcher_alloc(ancestor_matcher_t *self,
         || self->left_sib == NULL || self->right_sib == NULL
         || self->recombination_required == NULL || self->likelihood == NULL
         || self->likelihood_cache == NULL || self->likelihood_nodes == NULL
-        || self->likelihood_nodes_tmp == NULL || self->allelic_state == NULL) {
+        || self->node_scratch == NULL || self->allelic_state == NULL) {
         ret = TSI_ERR_NO_MEMORY;
         goto out;
     }
@@ -468,7 +467,7 @@ ancestor_matcher_free(ancestor_matcher_t *self)
     tsi_safe_free(self->likelihood);
     tsi_safe_free(self->likelihood_cache);
     tsi_safe_free(self->likelihood_nodes);
-    tsi_safe_free(self->likelihood_nodes_tmp);
+    tsi_safe_free(self->node_scratch);
     tsi_safe_free(self->allelic_state);
     tsi_safe_free(self->max_likelihood_node);
     tsi_safe_free(self->traceback);
@@ -499,7 +498,8 @@ ancestor_matcher_delete_likelihood(
 
 /* Store the recombination_required state in the traceback */
 static int WARN_UNUSED
-ancestor_matcher_store_traceback(ancestor_matcher_t *self, const tsk_id_t site_id)
+ancestor_matcher_store_traceback(
+    ancestor_matcher_t *self, const tsk_id_t site_id, const tsk_id_t start)
 {
     int ret = 0;
     tsk_id_t u;
@@ -516,7 +516,7 @@ ancestor_matcher_store_traceback(ancestor_matcher_t *self, const tsk_id_t site_i
     /* Check to see if the previous site has the same recombination_required. If so,
      * we can reuse the same list. */
     match = false;
-    if (site_id > 0) {
+    if (site_id > start) {
         list = &T[site_id - 1];
         if (list->size == num_likelihood_nodes) {
             list_node = list->node;
@@ -688,7 +688,7 @@ ancestor_matcher_coalesce_likelihoods(ancestor_matcher_t *self,
     int ret = 0;
     double L_p;
     tsk_id_t u, v, p;
-    tsk_id_t *restrict cached_paths = self->likelihood_nodes_tmp;
+    tsk_id_t *restrict cached_paths = self->node_scratch;
     const int old_num_likelihood_nodes = self->num_likelihood_nodes;
     tsk_id_t *restrict L_nodes = self->likelihood_nodes;
     int j, num_cached_paths, num_likelihood_nodes;
@@ -747,8 +747,8 @@ ancestor_matcher_coalesce_likelihoods(ancestor_matcher_t *self,
 
 static int
 ancestor_matcher_update_site_state(ancestor_matcher_t *self, const tsk_id_t site,
-    const allele_t state, tsk_id_t *restrict parent, double *restrict L,
-    double *restrict L_cache)
+    const tsk_id_t start, const allele_t state, tsk_id_t *restrict parent,
+    double *restrict L, double *restrict L_cache)
 {
     int ret = 0;
     mutation_list_node_t *mutation = self->matcher_indexes->sites.mutations[site];
@@ -777,7 +777,7 @@ ancestor_matcher_update_site_state(ancestor_matcher_t *self, const tsk_id_t site
     if (ret != 0) {
         goto out;
     }
-    ret = ancestor_matcher_store_traceback(self, site);
+    ret = ancestor_matcher_store_traceback(self, site, start);
     if (ret != 0) {
         goto out;
     }
@@ -789,24 +789,28 @@ out:
     return ret;
 }
 
-static void
-ancestor_matcher_reset_tree(ancestor_matcher_t *self)
+void
+ancestor_matcher_reset_topology(ancestor_matcher_t *self)
 {
     memset(self->parent, 0xff, self->num_nodes * sizeof(*self->parent));
     memset(self->left_child, 0xff, self->num_nodes * sizeof(*self->left_child));
     memset(self->right_child, 0xff, self->num_nodes * sizeof(*self->right_child));
     memset(self->left_sib, 0xff, self->num_nodes * sizeof(*self->left_sib));
     memset(self->right_sib, 0xff, self->num_nodes * sizeof(*self->right_sib));
-    memset(self->recombination_required, 0xff,
-        self->num_nodes * sizeof(*self->recombination_required));
+    self->forward_insertion = 0;
+    self->forward_removal = 0;
+    self->topology_position = 0;
+    self->topology_valid = false;
 }
 
 static int
-ancestor_matcher_reset(ancestor_matcher_t *self)
+ancestor_matcher_reset_match(ancestor_matcher_t *self)
 {
     int ret = 0;
 
     memset(self->allelic_state, 0xff, self->num_nodes * sizeof(*self->allelic_state));
+    memset(self->recombination_required, 0xff,
+        self->num_nodes * sizeof(*self->recombination_required));
 
     if (self->traceback_allocator.total_size > self->traceback_realloc_size) {
         tsi_blkalloc_free(&self->traceback_allocator);
@@ -822,9 +826,66 @@ ancestor_matcher_reset(ancestor_matcher_t *self)
     }
     self->total_traceback_size = 0;
     self->num_likelihood_nodes = 0;
-    ancestor_matcher_reset_tree(self);
 out:
     return ret;
+}
+
+/* Establish the half-open starting tree without processing observations or
+ * likelihoods. Ordered calls consume only the remaining forward events. */
+static void
+ancestor_matcher_prepare_topology(ancestor_matcher_t *self, coordinate_t target)
+{
+    const edge_t *in = self->matcher_indexes->left_index_edges;
+    const edge_t *out = self->matcher_indexes->right_index_edges;
+    const int_fast32_t M = (int_fast32_t) self->matcher_indexes->num_edges;
+    int_fast32_t in_index = self->forward_insertion;
+    int_fast32_t out_index = self->forward_removal;
+    coordinate_t pos;
+
+    if (!(self->flags & TSI_REUSE_TOPOLOGY) || !self->topology_valid
+        || target < self->topology_position) {
+        ancestor_matcher_reset_topology(self);
+        in_index = 0;
+        out_index = 0;
+        /* Install only active edges, skipping expired removals. */
+        while (in_index < M && in[in_index].left <= target) {
+            if (in[in_index].right > target) {
+                insert_edge(in[in_index], self->parent, self->left_child,
+                    self->right_child, self->left_sib, self->right_sib);
+            }
+            in_index++;
+        }
+        while (out_index < M && out[out_index].right <= target) {
+            out_index++;
+        }
+    } else {
+        while (in_index < M || out_index < M) {
+            pos = self->matcher_indexes->sites.position[self->num_sites];
+            if (in_index < M) {
+                pos = TSK_MIN(pos, in[in_index].left);
+            }
+            if (out_index < M) {
+                pos = TSK_MIN(pos, out[out_index].right);
+            }
+            if (pos > target) {
+                break;
+            }
+            while (out_index < M && out[out_index].right == pos) {
+                remove_edge(out[out_index], self->parent, self->left_child,
+                    self->right_child, self->left_sib, self->right_sib);
+                out_index++;
+            }
+            while (in_index < M && in[in_index].left == pos) {
+                insert_edge(in[in_index], self->parent, self->left_child,
+                    self->right_child, self->left_sib, self->right_sib);
+                in_index++;
+            }
+        }
+    }
+    self->forward_insertion = in_index;
+    self->forward_removal = out_index;
+    self->topology_position = target;
+    self->topology_valid = true;
 }
 
 /* Resets the recombination_required array from the traceback at the specified site.
@@ -865,16 +926,15 @@ ancestor_matcher_unset_recombination_required(
 
 static int WARN_UNUSED
 ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
-    const allele_t *TSK_UNUSED(haplotype), allele_t *restrict match,
-    size_t *path_length_out, tsk_id_t *restrict path_left, tsk_id_t *restrict path_right,
-    tsk_id_t *restrict path_parent)
+    tsk_id_t *restrict parent, const allele_t *TSK_UNUSED(haplotype),
+    allele_t *restrict match, size_t *path_length_out, tsk_id_t *restrict path_left,
+    tsk_id_t *restrict path_right, tsk_id_t *restrict path_parent)
 {
     int ret = 0;
     tsk_id_t site;
     edge_t edge;
     tsk_id_t u, v, max_likelihood_node;
     coordinate_t left, right, pos, start_pos, end_pos, last_pos;
-    tsk_id_t *restrict parent = self->parent;
     allele_t *restrict allelic_state = self->allelic_state;
     int8_t *restrict recombination_required = self->recombination_required;
     const edge_t *restrict in = self->matcher_indexes->right_index_edges;
@@ -898,22 +958,29 @@ ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_
     assert(path_parent[path_length] != NULL_NODE);
 
     /* Now go through the trees in reverse and run the traceback */
-    memset(parent, 0xff, self->num_nodes * sizeof(*parent));
     memset(
         recombination_required, 0xff, self->num_nodes * sizeof(*recombination_required));
     site = end - 1;
     last_pos = sites_position[site];
-    /* Install only edges active at the last observation. Later topology
-     * events, including those before end_pos, are irrelevant to traceback. */
-    while (in_index >= 0 && in[in_index].right > last_pos) {
-        edge = in[in_index];
-        if (edge.left <= last_pos) {
-            parent[edge.child] = edge.parent;
+    if (self->flags & TSI_REUSE_TOPOLOGY) {
+        /* The opposite event arrays are traversed with local reverse cursors.
+         * Only scratch parents are rewound; the forward tree stays intact. */
+        in_index = self->forward_removal - 1;
+        out_index = self->forward_insertion - 1;
+    } else {
+        memset(parent, 0xff, self->num_nodes * sizeof(*parent));
+        /* Install only edges active at the last observation. Later topology
+         * events, including those before end_pos, are irrelevant to traceback. */
+        while (in_index >= 0 && in[in_index].right > last_pos) {
+            edge = in[in_index];
+            if (edge.left <= last_pos) {
+                parent[edge.child] = edge.parent;
+            }
+            in_index--;
         }
-        in_index--;
-    }
-    while (out_index >= 0 && out[out_index].left > last_pos) {
-        out_index--;
+        while (out_index >= 0 && out[out_index].left > last_pos) {
+            out_index--;
+        }
     }
     pos = end_pos;
 
@@ -1017,20 +1084,8 @@ ancestor_matcher_run_forwards_match(
     const coordinate_t end_pos = sites_position[end];
     const coordinate_t sequence_length = sites_position[self->num_sites];
 
-    /* Load the tree for start */
-    in_index = 0;
-    out_index = 0;
-    while (in_index < M && in[in_index].left <= start_pos) {
-        if (in[in_index].right > start_pos) {
-            insert_edge(
-                in[in_index], parent, left_child, right_child, left_sib, right_sib);
-        }
-        in_index++;
-    }
-    /* Expired edges were never installed, so skip their removal events. */
-    while (out_index < M && out[out_index].right <= start_pos) {
-        out_index++;
-    }
+    in_index = self->forward_insertion;
+    out_index = self->forward_removal;
     left = start_pos;
     right = sequence_length;
     if (in_index < M) {
@@ -1112,7 +1167,7 @@ ancestor_matcher_run_forwards_match(
         while (site < end && left <= sites_position[site]
                && sites_position[site] < TSK_MIN(right, end_pos)) {
             ret = ancestor_matcher_update_site_state(
-                self, site, haplotype[site], parent, L, L_cache);
+                self, site, start, haplotype[site], parent, L, L_cache);
             if (ret != 0) {
                 goto out;
             }
@@ -1190,6 +1245,9 @@ ancestor_matcher_run_forwards_match(
             right = TSK_MIN(right, out[out_index].right);
         }
     }
+    self->topology_position = sites_position[end - 1];
+    self->forward_insertion = in_index;
+    self->forward_removal = out_index;
 out:
     return ret;
 }
@@ -1200,27 +1258,38 @@ ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t en
     tsk_id_t *path_left, tsk_id_t *path_right, tsk_id_t *path_parent)
 {
     int ret = 0;
+    tsk_id_t *traceback_parent = self->parent;
 
-    ret = ancestor_matcher_reset(self);
+    ret = ancestor_matcher_reset_match(self);
     if (ret != 0) {
         goto out;
     }
+    ancestor_matcher_prepare_topology(
+        self, self->matcher_indexes->sites.position[start]);
     ret = ancestor_matcher_run_forwards_match(self, start, end, haplotype);
     if (ret != 0) {
         goto out;
     }
-    ret = ancestor_matcher_run_traceback(self, start, end, haplotype, matched_haplotype,
-        path_length, path_left, path_right, path_parent);
+    if (self->flags & TSI_REUSE_TOPOLOGY) {
+        /* Coalescing is finished, so node_scratch can hold reverse parent links. */
+        traceback_parent = self->node_scratch;
+        memcpy(traceback_parent, self->parent, self->num_nodes * sizeof(*self->parent));
+    }
+    ret = ancestor_matcher_run_traceback(self, start, end, traceback_parent, haplotype,
+        matched_haplotype, path_length, path_left, path_right, path_parent);
     if (ret != 0) {
         goto out;
     }
-    /* Reset some memory for the next call */
+out:
+    if (ret != 0 || !(self->flags & TSI_REUSE_TOPOLOGY)) {
+        self->topology_valid = false;
+    }
+    /* Allocator-backed headers must not survive success or failure. */
     memset(
         self->traceback + start, 0, ((size_t) (end - start)) * sizeof(*self->traceback));
     memset(self->max_likelihood_node + start, 0xff,
         ((size_t) (end - start)) * sizeof(*self->max_likelihood_node));
 
-out:
     return ret;
 }
 
