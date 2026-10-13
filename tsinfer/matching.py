@@ -305,15 +305,41 @@ def extend_ts(
     the next group.
     """
     t_start = time_.monotonic()
+    tables = ts.dump_tables()
+    append_match_results(tables, paired_results, allele_mapper)
+    result_ts = finalise_match_tables(tables, provenance_record)
+
+    logger.info(
+        "extend_ts: added %d nodes (%d total), %d edges, %d mutations, "
+        "%d individuals | total=%.3fs",
+        result_ts.num_nodes - ts.num_nodes,
+        result_ts.num_nodes,
+        result_ts.num_edges,
+        result_ts.num_mutations,
+        result_ts.num_individuals,
+        time_.monotonic() - t_start,
+    )
+    return result_ts
+
+
+def append_match_results(
+    tables: tskit.TableCollection,
+    paired_results: list[tuple[config.MatchJob, MatchResult]],
+    allele_mapper: vcz.AlleleMapper,
+) -> None:
+    """Append one batch of nodes, edges and decoded mutations to ``tables``.
+
+    Each batch is sorted by ``haplotype_index``. Callers must supply batches in
+    global haplotype order to preserve node order. Match results and temporary
+    mutation data are retained only during this call. Finalise the accumulated
+    tables with :func:`finalise_match_tables` once all batches are appended.
+    """
 
     # Sort by haplotype_index so nodes within each individual are ordered
     paired_results = sorted(paired_results, key=lambda p: p[0].haplotype_index)
-
-    tables = ts.dump_tables()
-    pos_arr = tables.sites.position.astype(np.float64)
+    pos_arr = tables.sites.position
 
     # Add nodes, edges, and collect mutation data for each (job, result) pair
-    new_node_ids = []
     mut_data = []  # list of (site_id, code, node_id)
     for job, result in paired_results:
         node_meta = {
@@ -328,7 +354,6 @@ def extend_ts(
             individual=job.individual_id if job.individual_id is not None else -1,
             population=job.population_id if job.population_id is not None else -1,
         )
-        new_node_ids.append(node_id)
 
         for seg in result.path:
             tables.edges.add_row(
@@ -352,6 +377,19 @@ def extend_ts(
                 parent=-1,
             )
 
+
+def finalise_match_tables(
+    tables: tskit.TableCollection,
+    provenance_record: str | None = None,
+) -> tskit.TreeSequence:
+    """Sort, index and create a tree sequence from accumulated match tables.
+
+    Mutation parents are computed after sorting and indexing. An optional
+    provenance record is added before constructing the tree sequence. See
+    :func:`append_match_results` for appending independent batches and
+    :func:`extend_ts` for extending a reference with one group of results.
+    """
+    t_start = time_.monotonic()
     t0 = time_.monotonic()
     tables.sort()
     t_sort = time_.monotonic() - t0
@@ -372,10 +410,9 @@ def extend_ts(
     t_ts = time_.monotonic() - t0
 
     logger.info(
-        "extend_ts: added %d nodes (%d total), %d edges, %d mutations, "
+        "finalise_match_tables: %d nodes, %d edges, %d mutations, "
         "%d individuals | sort=%.3fs index=%.3fs mut_parents=%.3fs "
         "tree_sequence=%.3fs total=%.3fs",
-        len(new_node_ids),
         result_ts.num_nodes,
         result_ts.num_edges,
         result_ts.num_mutations,

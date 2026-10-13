@@ -664,6 +664,51 @@ class TestExtendTs:
         assert n0_meta["ploidy_index"] == 0
         assert n1_meta["ploidy_index"] == 1
 
+    def test_append_batches_matches_extend(self):
+        individuals = [
+            {"source": "test", "sample_id": "s0"},
+            {"source": "test", "sample_id": "s1"},
+        ]
+        populations = [{"name": "p0"}, {"name": "p1"}]
+        ts = self._root_ts(individuals=individuals, populations=populations)
+        jobs = [
+            _make_job(
+                haplotype_index=i,
+                time=0,
+                sample_id=f"s{i // 2}",
+                ploidy_index=i % 2,
+                individual_id=i // 2,
+                population_id=i // 2,
+                node_flags=tskit.NODE_IS_SAMPLE if i % 2 == 0 else 0,
+            )
+            for i in range(4)
+        ]
+        results = [self._simple_match_result(1, len(self.positions)) for _ in jobs]
+        results[0].mutations.append(matching.Mutation(position=20, derived_state=1))
+        results[2].mutations.append(matching.Mutation(position=30, derived_state=1))
+        paired_results = list(zip(jobs, results))
+        # Both paths append to a reference with existing sample metadata and mutations.
+        initial = matching.extend_ts(
+            ts, paired_results=paired_results[:1], allele_mapper=self.allele_mapper
+        )
+        record = '{"software": {"name": "batch_check"}}'
+        expected = matching.extend_ts(
+            initial,
+            paired_results=paired_results,
+            allele_mapper=self.allele_mapper,
+            provenance_record=record,
+        )
+        tables = initial.dump_tables()
+        first_batch = paired_results[:2]
+        second_batch = paired_results[2:]
+        first_batch.reverse()
+        second_batch.reverse()
+        matching.append_match_results(tables, first_batch, self.allele_mapper)
+        matching.append_match_results(tables, second_batch, self.allele_mapper)
+        actual = matching.finalise_match_tables(tables, provenance_record=record)
+        actual.tables.assert_equals(expected.tables, ignore_provenance=True)
+        assert actual.provenance(actual.num_provenances - 1).record == record
+
 
 # ---------------------------------------------------------------------------
 # TestMatcherExtendCycle
