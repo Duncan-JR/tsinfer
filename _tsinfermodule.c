@@ -675,10 +675,12 @@ AncestorMatcher_find_path(AncestorMatcher *self, PyObject *args, PyObject *kwds)
         goto out;
     }
 
-    dims[0] = self->ancestor_matcher->num_sites;
+    /* At most one copying segment can start at each processed site. */
+    dims[0] = end - start;
     left = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_UINT32);
     right = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_UINT32);
     parent = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT32);
+    dims[0] = self->ancestor_matcher->num_sites;
     match = (PyArrayObject *) PyArray_SimpleNew(1, dims, NPY_INT8);
     if (left == NULL || right == NULL || parent == NULL || match == NULL) {
         goto out;
