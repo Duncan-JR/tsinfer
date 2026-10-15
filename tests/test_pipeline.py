@@ -336,6 +336,50 @@ class TestReferenceTsEquivalence:
 
 
 class TestPostProcess:
+    @pytest.mark.parametrize("split_ultimate", [False, True])
+    def test_split_ultimate(self, split_ultimate):
+        tables = tskit.TableCollection(12)
+        tables.metadata_schema = tskit.MetadataSchema.permissive_json()
+        tables.metadata = {"sequence_intervals": [[1, 11]]}
+        tables.nodes.metadata_schema = tskit.MetadataSchema.permissive_json()
+        for time in [4, 3, 1, 0, 0, 0]:
+            tables.nodes.add_row(
+                time=time, flags=int(time == 0), metadata={"time": time}
+            )
+        for left, right, parent, child in [
+            (1, 12, 0, 1),
+            (0, 12, 1, 2),
+            (0, 5, 1, 5),
+            (5, 11, 1, 4),
+            (0, 11, 2, 3),
+            (0, 5, 2, 4),
+            (5, 11, 2, 5),
+        ]:
+            tables.edges.add_row(left, right, parent, child)
+        # Include mutations on both the vestigial and ultimate ancestors,
+        # with one exactly at the root split.
+        for position, node in [(2, 0), (5, 1), (8, 3)]:
+            site = tables.sites.add_row(position, ancestral_state="A")
+            tables.mutations.add_row(site, node, derived_state="T")
+        tables.sort()
+        ts = tables.tree_sequence()
+
+        result = pipeline.post_process(ts, split_ultimate=split_ultimate)
+
+        np.testing.assert_array_equal(result.genotype_matrix(), ts.genotype_matrix())
+        np.testing.assert_array_equal(result.sites_position, ts.sites_position)
+        assert result.metadata == ts.metadata
+        assert result.at(0).num_edges == result.at(11).num_edges == 0
+        left_root = result.at(2).root
+        right_root = result.at(5).root
+        assert (left_root != right_root) == split_ultimate
+        assert result.node(left_root).metadata == {"time": 3}
+        assert result.mutation(0).node == left_root
+        assert result.mutation(1).node == right_root
+        result.tables.assert_equals(
+            pipeline.post_process(result).tables, ignore_provenance=True
+        )
+
     def test_simplify_reduces_nodes(self):
         sim_ts = _simulate(num_samples=6, random_seed=10)
         matched_ts = _infer_and_match(sim_ts)

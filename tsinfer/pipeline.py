@@ -670,24 +670,27 @@ def match(
 
 def post_process(
     ts: tskit.TreeSequence,
-    cfg: config.Config,
+    cfg: config.Config | None = None,
     **kwargs,
 ) -> tskit.TreeSequence:
     """
-    Post-process a matched tree sequence.
+    Split the ultimate ancestor and simplify a matched tree sequence.
+
+    If cfg is omitted, use the default PostProcessConfig. Before dating, also
+    run tsdate.preprocess_ts to split disjoint nodes.
     """
-    pp = cfg.post_process
+    pp = config.PostProcessConfig() if cfg is None else cfg.post_process
     if pp is None:
         return ts
 
     erase_flanks = kwargs.get("erase_flanks", pp.erase_flanks)
     split_ultimate = kwargs.get("split_ultimate", pp.split_ultimate)
 
-    if erase_flanks:
-        ts = _erase_flanks(ts)
-
     if split_ultimate:
         ts = _split_ultimate(ts)
+
+    if erase_flanks:
+        ts = _erase_flanks(ts)
 
     ts = ts.simplify()
     return ts
@@ -724,9 +727,51 @@ def _erase_flanks(ts: tskit.TreeSequence) -> tskit.TreeSequence:
 
 
 def _split_ultimate(ts: tskit.TreeSequence) -> tskit.TreeSequence:
-    """Split ultimate ancestor nodes. No-op for now."""
-    # TODO: implement ultimate ancestor splitting
-    return ts
+    """Detach the vestigial root and split its child when its children change."""
+    if ts.num_edges < 2:
+        return ts
+    stem = ts.edge(-1)
+    if ts.edge(-2).parent == stem.parent:
+        return ts
+    # Ignore isolated sample roots in flanks that contain only reference ancestry.
+    for tree in ts.trees(root_threshold=2):
+        if tree.num_roots > 0:
+            # Sample paths can start before the vestigial root's edge.
+            if tree.num_roots != 1 or tree.root not in (stem.parent, stem.child):
+                return ts
+
+    tables = ts.dump_tables()
+    tables.edges.truncate(ts.num_edges - 1)
+    mutation_nodes = tables.mutations.node
+    mutation_nodes[mutation_nodes == stem.parent] = stem.child
+    tables.mutations.node = mutation_nodes
+    ts = tables.tree_sequence()
+
+    root = ts.node(stem.child)
+    root_edges = ts.edges_parent == root.id
+    breaks = np.unique(
+        np.concatenate((ts.edges_left[root_edges], ts.edges_right[root_edges]))
+    )
+    if len(breaks) <= 2:
+        return ts
+
+    tables.edges.keep_rows(~root_edges)
+    first_root = len(tables.nodes)
+    tree = ts.first()
+    for left, right in zip(breaks[:-1], breaks[1:]):
+        tree.seek(left)
+        new_root = tables.nodes.append(root)
+        for child in tree.children(root.id):
+            tables.edges.add_row(left, right, parent=new_root, child=child)
+
+    root_mutations = mutation_nodes == root.id
+    positions = ts.sites_position[ts.mutations_site[root_mutations]]
+    mutation_nodes[root_mutations] = (
+        first_root + np.searchsorted(breaks, positions, side="right") - 1
+    )
+    tables.mutations.node = mutation_nodes
+    tables.sort()
+    return tables.tree_sequence()
 
 
 def augment_sites(
