@@ -1603,8 +1603,9 @@ class ScheduledCache:
     A pool of background worker threads autonomously loads chunks in
     schedule order, blocking when the memory budget is full.  Chunks are
     evicted when their refcount reaches zero, freeing space for workers.
-    ``get()`` never triggers a load — it returns cached data or waits
-    for a worker to deliver it.
+    ``get()`` waits for outstanding loads and can load a chunk synchronously
+    to recover from memory pressure. Concurrent loads of a key are deduplicated
+    across workers and callers. Loader errors are retained and raised to readers.
     """
 
     def __init__(
@@ -1616,6 +1617,8 @@ class ScheduledCache:
     ):
         self._max_bytes = max_bytes
         self._chunks: dict[tuple[str, int], np.ndarray] = {}
+        self._in_flight: set[tuple[str, int]] = set()
+        self._errors: dict[tuple[str, int], Exception] = {}
         self._current_bytes = 0
         self._pending_bytes = 0
         self._refcount = dict(refcounts)
@@ -1672,13 +1675,18 @@ class ScheduledCache:
     # ----- worker pool -----------------------------------------------------
 
     def _advance_cursor(self) -> tuple[str, int] | None:
-        """Advance cursor past cached/unneeded chunks, return next needed key.
+        """Skip cached, in-flight, failed, or unneeded chunks; return the next key.
 
         Must be called under ``self._condition``.
         """
         while self._cursor < len(self._chunk_order):
             k = self._chunk_order[self._cursor]
-            if k in self._chunks or k not in self._refcount:
+            if (
+                k in self._chunks
+                or k in self._in_flight
+                or k in self._errors
+                or k not in self._refcount
+            ):
                 self._cursor += 1
                 continue
             if k[0] not in self._loaders:
@@ -1732,25 +1740,45 @@ class ScheduledCache:
                     committed = self._current_bytes + self._pending_bytes + est
                     if committed <= self._max_bytes:
                         self._cursor += 1
+                        self._in_flight.add(key)
                         self._pending_bytes += est
                         break
                     self._condition.wait()
                 else:
                     return  # shutdown requested
 
-            t_load = _time.monotonic()
-            data = self._loaders[key[0]](key[1])
-            load_elapsed = _time.monotonic() - t_load
+            self._load_chunk(key, est)
 
-            with self._condition:
+    def _load_chunk(self, key: tuple[str, int], est: int) -> None:
+        """Load outside the lock, then publish and release ownership under it.
+
+        The caller must first claim the key and reserve ``est`` bytes under
+        ``self._condition``, then release the lock before calling this method.
+        """
+        load_error = None
+        t_load = _time.monotonic()
+        try:
+            data = self._loaders[key[0]](key[1])
+        except Exception as error:
+            load_error = error
+        load_elapsed = _time.monotonic() - t_load
+
+        with self._condition:
+            if load_error is None:
                 self._chunks[key] = data
                 self._current_bytes += data.nbytes
-                self._pending_bytes -= est
-                self._total_load_time += load_elapsed
-                self._total_loads += 1
                 state = self._cache_state_summary()
-                self._condition.notify_all()
+                current_bytes = self._current_bytes
+                num_entries = len(self._chunks)
+            else:
+                self._errors[key] = load_error
+            self._pending_bytes -= est
+            self._in_flight.remove(key)
+            self._total_load_time += load_elapsed
+            self._total_loads += 1
+            self._condition.notify_all()
 
+        if load_error is None:
             logger.info(
                 "Chunk cache load: source=%s chunk=%d size=%.1f MiB"
                 " load=%.3fs (total: %.1f MiB, %d entries)",
@@ -1758,8 +1786,8 @@ class ScheduledCache:
                 key[1],
                 data.nbytes / (1024 * 1024),
                 load_elapsed,
-                self._current_bytes / (1024 * 1024),
-                len(self._chunks),
+                current_bytes / (1024 * 1024),
+                num_entries,
             )
             logger.debug("Chunk cache state: %s", state)
 
@@ -1770,8 +1798,9 @@ class ScheduledCache:
 
         If workers cannot make progress (e.g. the cursor has passed this
         chunk after a force-eviction), falls back to loading the chunk
-        synchronously from the calling thread, evicting another chunk
-        first to stay within the memory budget.
+        synchronously from the calling thread. It first evicts one cached
+        chunk if possible, but may exceed the memory budget to make progress.
+        An outstanding load is shared; a failed load raises its stored error.
         """
         with self._condition:
             if key in self._chunks:
@@ -1779,29 +1808,30 @@ class ScheduledCache:
                 return self._chunks[key]
             self._misses += 1
             t_wait = _time.monotonic()
-            while key not in self._chunks:
-                if not self._condition.wait(timeout=1.0):
-                    if key[0] in self._loaders and key not in self._chunks:
-                        # Evict a chunk to stay within the memory budget
-                        self._force_evict()
-                        loader = self._loaders[key[0]]
-                        logger.warning(
-                            "Chunk cache stall: loading source=%s "
-                            "chunk=%d synchronously",
-                            key[0],
-                            key[1],
-                        )
-                        self._condition.release()
-                        try:
-                            data = loader(key[1])
-                        finally:
-                            self._condition.acquire()
-                        if key not in self._chunks:
-                            self._chunks[key] = data
-                            self._current_bytes += data.nbytes
-                            self._condition.notify_all()
-            self._total_wait_time += _time.monotonic() - t_wait
-            return self._chunks[key]
+        while True:
+            with self._condition:
+                if key in self._errors:
+                    self._total_wait_time += _time.monotonic() - t_wait
+                    raise self._errors[key]
+                if key in self._chunks:
+                    self._total_wait_time += _time.monotonic() - t_wait
+                    return self._chunks[key]
+                if self._condition.wait(timeout=1.0):
+                    continue
+                if key in self._chunks or key in self._errors or key in self._in_flight:
+                    continue
+                if key[0] not in self._loaders:
+                    continue
+                est = self._chunk_bytes.get(key[0], 0)
+                self._in_flight.add(key)
+                self._pending_bytes += est
+                self._force_evict()
+                logger.warning(
+                    "Chunk cache stall: loading source=%s chunk=%d synchronously",
+                    key[0],
+                    key[1],
+                )
+            self._load_chunk(key, est)
 
     def record_read(self, key: tuple[str, int]) -> None:
         """Record that one haplotype was read from *key*.
@@ -1860,7 +1890,7 @@ class ScheduledCache:
         )
 
     def shutdown(self) -> None:
-        """Stop workers and log summary stats."""
+        """Stop workers and log summary stats, counting all loader attempts."""
         with self._condition:
             self._shutdown = True
             self._condition.notify_all()

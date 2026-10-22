@@ -1489,6 +1489,191 @@ class TestScheduledCache:
 
     # --- Group 4: concurrent get() ---
 
+    @pytest.mark.parametrize("owner", ["background", "synchronous"])
+    def test_concurrent_slow_load(self, owner, monkeypatch):
+        """A timed-out reader shares an outstanding load, regardless of its owner."""
+        key = ("s", 1)
+        chunk_order = [key]
+        refcounts = {key: 3}
+        if owner == "synchronous":
+            chunk_order.insert(0, ("s", 0))
+            refcounts[("s", 0)] = 1
+        cache = vcz.ScheduledCache(10, refcounts, chunk_order)
+        load_started = threading.Event()
+        release_load = threading.Event()
+        readers_timed_out = threading.Event()
+        timed_out = set()
+        calls = []
+        results = [None, None, None]
+        errors = [None, None, None]
+        threads = []
+        condition_wait = cache._condition.wait
+
+        def observe_wait(timeout=None):
+            notified = condition_wait(timeout)
+            if timeout is not None and not notified:
+                timed_out.add(threading.current_thread())
+                if len(timed_out) == 3:
+                    readers_timed_out.set()
+            return notified
+
+        def loader(idx):
+            calls.append(idx)
+            if idx == 1:
+                load_started.set()
+                assert release_load.wait(timeout=30)
+            return _arr(10)
+
+        def reader(i):
+            try:
+                results[i] = cache.get(key)
+            except Exception as error:
+                errors[i] = error
+
+        monkeypatch.setattr(cache._condition, "wait", observe_wait)
+        cache.register_loader("s", loader, chunk_bytes=10)
+        try:
+            cache.start()
+            if owner == "background":
+                assert load_started.wait(timeout=5)
+            else:
+                cache.get(("s", 0))
+            for i in range(3):
+                thread = threading.Thread(target=reader, args=(i,))
+                thread.start()
+                threads.append(thread)
+                if owner == "synchronous" and i == 0:
+                    assert load_started.wait(timeout=5)
+                    # The worker must skip the key while the caller still owns it.
+                    cache._workers[0].join(timeout=5)
+                    assert not cache._workers[0].is_alive()
+            assert readers_timed_out.wait(timeout=5)
+            with cache._condition:
+                assert cache._in_flight == {key}
+                assert cache._pending_bytes == 10
+                load_time_before = cache._total_load_time
+            release_load.set()
+            for thread in threads:
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+            # Include any worker woken by the synchronous owner's forced eviction.
+            for thread in cache._workers:
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+            assert calls.count(1) == 1
+            assert errors == [None, None, None]
+            assert all(result is results[0] for result in results)
+            np.testing.assert_array_equal(results[0], _arr(10))
+            assert cache._chunks == {key: results[0]}
+            assert cache._pending_bytes == 0
+            assert cache._in_flight == set()
+            assert cache.total_bytes == results[0].nbytes
+            assert cache._total_loads == len(calls)
+            assert cache._total_loads == (2 if owner == "synchronous" else 1)
+            assert cache._total_load_time > load_time_before
+            assert cache._total_evictions == (1 if owner == "synchronous" else 0)
+        finally:
+            release_load.set()
+            for thread in threads:
+                thread.join(timeout=5)
+            cache.shutdown()
+            assert all(not thread.is_alive() for thread in threads)
+            assert all(not thread.is_alive() for thread in cache._workers)
+
+    @pytest.mark.parametrize("owner", ["background", "synchronous"])
+    def test_concurrent_load_failure(self, owner, monkeypatch):
+        """All readers receive the owner's error without retrying the load."""
+        key = ("s", 1)
+        chunk_order = [key]
+        refcounts = {key: 3}
+        if owner == "synchronous":
+            chunk_order.insert(0, ("s", 0))
+            refcounts[("s", 0)] = 1
+        cache = vcz.ScheduledCache(10, refcounts, chunk_order)
+        load_started = threading.Event()
+        release_load = threading.Event()
+        readers_timed_out = threading.Event()
+        timed_out = set()
+        calls = []
+        errors = [None, None, None]
+        threads = []
+        load_error = ValueError("chunk load failed")
+        condition_wait = cache._condition.wait
+
+        def observe_wait(timeout=None):
+            notified = condition_wait(timeout)
+            if timeout is not None and not notified:
+                timed_out.add(threading.current_thread())
+                if len(timed_out) == 3:
+                    readers_timed_out.set()
+            return notified
+
+        def loader(idx):
+            calls.append(idx)
+            if idx == 1:
+                load_started.set()
+                assert release_load.wait(timeout=30)
+                raise load_error
+            return _arr(10)
+
+        def reader(i):
+            try:
+                cache.get(key)
+            except Exception as error:
+                errors[i] = error
+
+        monkeypatch.setattr(cache._condition, "wait", observe_wait)
+        cache.register_loader("s", loader, chunk_bytes=10)
+        try:
+            cache.start()
+            if owner == "background":
+                assert load_started.wait(timeout=5)
+            else:
+                cache.get(("s", 0))
+            for i in range(3):
+                thread = threading.Thread(target=reader, args=(i,))
+                thread.start()
+                threads.append(thread)
+                if owner == "synchronous" and i == 0:
+                    assert load_started.wait(timeout=5)
+                    cache._workers[0].join(timeout=5)
+                    assert not cache._workers[0].is_alive()
+            assert readers_timed_out.wait(timeout=5)
+            with cache._condition:
+                assert cache._in_flight == {key}
+                assert cache._pending_bytes == 10
+                load_time_before = cache._total_load_time
+            release_load.set()
+            for thread in threads:
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+            for thread in cache._workers:
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+            assert all(error is load_error for error in errors)
+            with pytest.raises(ValueError, match="chunk load failed") as exc_info:
+                cache.get(key)
+            assert exc_info.value is load_error
+            assert calls.count(1) == 1
+            assert cache._chunks == {}
+            assert cache._errors == {key: load_error}
+            assert cache._pending_bytes == 0
+            assert cache._in_flight == set()
+            assert cache.total_bytes == 0
+            assert cache._total_loads == len(calls)
+            assert cache._total_loads == (2 if owner == "synchronous" else 1)
+            assert cache._total_load_time > load_time_before
+            assert cache._total_evictions == (1 if owner == "synchronous" else 0)
+        finally:
+            release_load.set()
+            for thread in threads:
+                thread.join(timeout=5)
+            cache.shutdown()
+            assert all(not thread.is_alive() for thread in threads)
+            assert all(not thread.is_alive() for thread in cache._workers)
+
     def test_concurrent_get_waiters(self):
         """Multiple threads waiting for the same chunk all get it."""
         cache = vcz.ScheduledCache(
