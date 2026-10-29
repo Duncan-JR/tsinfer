@@ -22,6 +22,11 @@ Tests for tsinfer.matching: make_root_ts, Matcher, extend_ts.
 
 from __future__ import annotations
 
+import concurrent.futures as cf
+import gc
+import multiprocessing as mp
+import weakref
+
 import msprime
 import numpy as np
 import pytest
@@ -1559,6 +1564,21 @@ class TestAncestorMatcherWrapper:
         np.testing.assert_array_equal(matched[start:end], h[start:end])
 
 
+def _match_prepared_files(spec):
+    arrays = [np.load(path, mmap_mode="r", allow_pickle=False) for path in spec["paths"]]
+    indexes = matching.MatcherIndexes.from_prepared(
+        *arrays, spec["num_nodes"], spec["sequence_length"]
+    )
+    n = indexes.num_sites
+    matcher = matching.AncestorMatcher(
+        indexes, np.full(n, 1e-3), np.zeros(n), reuse_topology=True
+    )
+    out = np.full(n, -9, dtype=np.int8)
+    h = np.array([1, 0, 1], dtype=np.int8)
+    path = matcher.find_path(h, 0, n, out)
+    return path, out
+
+
 class TestRegionalMatching:
     @pytest.fixture(params=[False, True])
     def reuse_topology(self, request):
@@ -1581,9 +1601,29 @@ class TestRegionalMatching:
         tables.sort()
         return tables.tree_sequence()
 
+    @pytest.fixture(params=["owned", "borrowed"])
+    def index_factory(self, request):
+        def build(reference):
+            owned = matching.MatcherIndexes(reference, vestigial_root=False)
+            if request.param == "owned":
+                return owned
+            insertion, removal = owned.export_edge_indexes()
+            return matching.MatcherIndexes.from_prepared(
+                insertion,
+                removal,
+                reference.sites_position,
+                reference.mutations_site,
+                reference.mutations_node,
+                np.full(reference.num_sites, 2, dtype=np.uint64),
+                reference.num_nodes,
+                reference.sequence_length,
+            )
+
+        return build
+
     @pytest.fixture
-    def indexes(self, reference):
-        return matching.MatcherIndexes(reference, vestigial_root=False)
+    def indexes(self, reference, index_factory):
+        return index_factory(reference)
 
     @pytest.fixture
     def matcher(self, reference, indexes, reuse_topology):
@@ -1638,10 +1678,12 @@ class TestRegionalMatching:
                     np.testing.assert_array_equal(actual, wanted)
                 np.testing.assert_array_equal(observed, expected)
 
-    def test_match_impossible_is_regional(self, reference, reuse_topology):
+    def test_match_impossible_is_regional(
+        self, reference, reuse_topology, index_factory
+    ):
         tables = reference.dump_tables()
         tables.mutations.clear()
-        indexes = matching.MatcherIndexes(tables.tree_sequence(), vestigial_root=False)
+        indexes = index_factory(tables.tree_sequence())
         rho = np.full(reference.num_sites, 1e-3)
         mu = np.zeros(reference.num_sites)
         matcher = matching.AncestorMatcher(
@@ -1679,3 +1721,152 @@ class TestRegionalMatching:
         with pytest.raises(ValueError, match="0 <= start < end <= num_sites"):
             matcher.find_path(h, start, end, match_out)
         np.testing.assert_array_equal(match_out, -9)
+
+
+class TestPreparedIndexes:
+    @pytest.fixture
+    def reference(self):
+        tables = tskit.TableCollection(20)
+        for time in [3, 2, 1]:
+            tables.nodes.add_row(time=time)
+        tables.edges.add_row(0, 20, 0, 1)
+        tables.edges.add_row(0, 20, 1, 2)
+        for position in [2, 5, 10]:
+            site = tables.sites.add_row(position, "A")
+            if position != 5:
+                tables.mutations.add_row(site, 2, "T")
+        tables.sort()
+        return tables.tree_sequence()
+
+    @pytest.fixture
+    def prepared(self, reference):
+        owned = matching.MatcherIndexes(reference, vestigial_root=False)
+        insertion, removal = owned.export_edge_indexes()
+        return dict(
+            insertion=insertion,
+            removal=removal,
+            positions=reference.sites_position,
+            mutation_site=reference.mutations_site,
+            mutation_node=reference.mutations_node,
+            num_alleles=np.full(reference.num_sites, 2, dtype=np.uint64),
+            num_nodes=reference.num_nodes,
+            sequence_length=reference.sequence_length,
+        )
+
+    def test_owner_lifetime_and_outputs(self, prepared):
+        prepared = dict(prepared)
+        for name in ("insertion", "removal"):
+            prepared[name] = prepared[name].copy()
+            prepared[name].flags.writeable = False
+        owners = [weakref.ref(prepared[name]) for name in ("insertion", "removal")]
+        indexes = matching.MatcherIndexes.from_prepared(**prepared)
+        del prepared
+        gc.collect()
+        assert all(owner() is not None for owner in owners)
+        n = indexes.num_sites
+        matcher = matching.AncestorMatcher(
+            indexes, np.full(n, 1e-3), np.zeros(n), reuse_topology=True
+        )
+        del indexes
+        gc.collect()
+        assert all(owner() is not None for owner in owners)
+        h = np.array([1, 0, 1], dtype=np.int8)
+        out = np.empty(n, dtype=np.int8)
+        path = matcher.find_path(h, 0, n, out)
+        saved = [array.copy() for array in path]
+        matcher.find_path(h, 2, 3, out)
+        matcher.find_path(h, 0, 1, out)
+        del matcher
+        gc.collect()
+        assert all(owner() is None for owner in owners)
+        for actual, expected in zip(path, saved):
+            np.testing.assert_array_equal(actual, expected)
+
+    def test_spawned_mappings(self, prepared, tmp_path):
+        paths = []
+        for name in (
+            "insertion",
+            "removal",
+            "positions",
+            "mutation_site",
+            "mutation_node",
+            "num_alleles",
+        ):
+            path = tmp_path / f"{name}.npy"
+            np.save(path, prepared[name], allow_pickle=False)
+            paths.append(path)
+        spec = dict(
+            paths=paths,
+            num_nodes=prepared["num_nodes"],
+            sequence_length=prepared["sequence_length"],
+        )
+        with cf.ProcessPoolExecutor(
+            max_workers=2, mp_context=mp.get_context("spawn")
+        ) as executor:
+            futures = [executor.submit(_match_prepared_files, spec) for _ in range(2)]
+            results = [future.result() for future in futures]
+        for actual, expected in zip(results[0][0], results[1][0]):
+            np.testing.assert_array_equal(actual, expected)
+        np.testing.assert_array_equal(results[0][1], results[1][1])
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "insertion",
+            "removal",
+            "positions",
+            "mutation_site",
+            "mutation_node",
+            "num_alleles",
+        ],
+    )
+    def test_wrong_dtype(self, prepared, field):
+        prepared[field] = prepared[field].astype(np.int16)
+        with pytest.raises(ValueError, match="exact native dtype"):
+            matching.MatcherIndexes.from_prepared(**prepared)
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            "writable",
+            "noncontiguous",
+            "wrong_width",
+            "wrong_edges",
+            "wrong_sites",
+            "wrong_mutations",
+            "unsorted_mutations",
+        ],
+    )
+    def test_invalid_layout(self, prepared, change):
+        if change == "writable":
+            prepared["insertion"] = prepared["insertion"].copy()
+        elif change == "noncontiguous":
+            prepared["insertion"] = prepared["insertion"][:, ::-1]
+        elif change == "wrong_width":
+            prepared["insertion"] = prepared["insertion"].reshape(-1, 2)
+        elif change == "wrong_edges":
+            prepared["removal"] = prepared["removal"][:1]
+        elif change == "wrong_sites":
+            prepared["num_alleles"] = prepared["num_alleles"][:1]
+        elif change == "wrong_mutations":
+            prepared["mutation_node"] = prepared["mutation_node"][:1]
+        else:
+            prepared["mutation_site"] = prepared["mutation_site"][::-1].copy()
+        with pytest.raises(ValueError):
+            matching.MatcherIndexes.from_prepared(**prepared)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("num_nodes", 0), ("sequence_length", float("nan")), ("sequence_length", -1)],
+    )
+    def test_invalid_scalars(self, prepared, field, value):
+        prepared[field] = value
+        with pytest.raises(ValueError):
+            matching.MatcherIndexes.from_prepared(**prepared)
+
+    @pytest.mark.parametrize("value", [-1, float("nan"), 20, 1])
+    def test_invalid_positions(self, prepared, value):
+        prepared["positions"] = prepared["positions"].copy()
+        prepared["positions"][1] = value
+        with pytest.raises(ValueError, match="site positions"):
+            matching.MatcherIndexes.from_prepared(**prepared)

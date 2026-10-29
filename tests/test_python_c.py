@@ -133,7 +133,8 @@ class TestUninitialised:
                     if not name.startswith("__"):
                         if inspect.isdatadescriptor(value):
                             attributes.append(name)
-                        else:
+                        elif getattr(value, "__self__", None) is not cls:
+                            # Class constructors do not inspect the instance.
                             methods.append(name)
                 uninitialised = cls.__new__(cls)
                 for attr in attributes:

@@ -115,6 +115,8 @@ matcher_indexes_copy_edge_indexes(
     tsk_size_t j;
     tsk_id_t k;
     edge_t e;
+    edge_t *left = malloc(self->num_edges * sizeof(*left));
+    edge_t *right = malloc(self->num_edges * sizeof(*right));
     const tsk_id_t *restrict I = tables->indexes.edge_insertion_order;
     const tsk_id_t *restrict O = tables->indexes.edge_removal_order;
     const double *restrict edges_right = tables->edges.right;
@@ -122,6 +124,13 @@ matcher_indexes_copy_edge_indexes(
     const tsk_id_t *restrict edges_child = tables->edges.child;
     const tsk_id_t *restrict edges_parent = tables->edges.parent;
 
+    self->owned_left_index_edges = left;
+    self->owned_right_index_edges = right;
+    self->left_index_edges = left;
+    self->right_index_edges = right;
+    if (left == NULL || right == NULL) {
+        return TSI_ERR_NO_MEMORY;
+    }
     for (j = 0; j < self->num_edges; j++) {
         k = I[j];
         /* TODO check that the edges can be cast */
@@ -129,14 +138,14 @@ matcher_indexes_copy_edge_indexes(
         e.right = (tsk_id_t) edges_right[k];
         e.parent = edges_parent[k];
         e.child = edges_child[k];
-        self->left_index_edges[j] = e;
+        left[j] = e;
 
         k = O[j];
         e.left = (tsk_id_t) edges_left[k];
         e.right = (tsk_id_t) edges_right[k];
         e.parent = edges_parent[k];
         e.child = edges_child[k];
-        self->right_index_edges[j] = e;
+        right[j] = e;
     }
     return ret;
 }
@@ -177,18 +186,15 @@ out:
  * order, so that when two mutations at a site are on the same node the
  * later one (the child) takes precedence. */
 static int
-matcher_indexes_copy_mutation_data(matcher_indexes_t *self,
-    const tsk_table_collection_t *tables, const tsk_size_t *num_alleles,
+matcher_indexes_copy_mutation_data(matcher_indexes_t *self, const double *sites_position,
+    double sequence_length, tsk_size_t total_mutations, const tsk_id_t *mutations_site,
+    const tsk_id_t *mutations_node, const tsk_size_t *num_alleles,
     const allele_t *ancestral_state, const allele_t *derived_state)
 {
     int ret = 0;
     tsk_size_t j;
     tsk_id_t site;
     allele_t state;
-    const double *restrict sites_position = tables->sites.position;
-    const tsk_id_t *restrict mutations_site = tables->mutations.site;
-    const tsk_id_t *restrict mutations_node = tables->mutations.node;
-    const tsk_size_t total_mutations = tables->mutations.num_rows;
     coordinate_t *restrict converted_position = self->sites.position;
 
     for (j = 0; j < self->num_sites; j++) {
@@ -203,7 +209,7 @@ matcher_indexes_copy_mutation_data(matcher_indexes_t *self,
         }
         self->sites.ancestral_state[j] = state;
     }
-    converted_position[j] = (coordinate_t) tables->sequence_length;
+    converted_position[j] = (coordinate_t) sequence_length;
 
     for (j = 0; j < total_mutations; j++) {
         site = mutations_site[j];
@@ -261,6 +267,28 @@ matcher_indexes_validate_tables(
     return 0;
 }
 
+static int
+matcher_indexes_alloc_sites(matcher_indexes_t *self)
+{
+    int ret;
+    self->sites.mutations = malloc(self->num_sites * sizeof(*self->sites.mutations));
+    self->sites.num_alleles = malloc(self->num_sites * sizeof(*self->sites.num_alleles));
+    self->sites.ancestral_state
+        = malloc(self->num_sites * sizeof(*self->sites.ancestral_state));
+    self->sites.position
+        = malloc((self->num_sites + 1) * sizeof(*self->sites.mutations));
+    if (self->sites.mutations == NULL || self->sites.position == NULL
+        || self->sites.num_alleles == NULL || self->sites.ancestral_state == NULL) {
+        ret = TSI_ERR_NO_MEMORY;
+        return ret;
+    }
+    ret = tsi_blkalloc_init(&self->allocator, 65536);
+    if (ret != 0) {
+        return ret;
+    }
+    return 0;
+}
+
 int
 matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tables,
     const tsk_size_t *num_alleles, const allele_t *ancestral_state,
@@ -269,6 +297,7 @@ matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tab
     int ret = 0;
 
     self->flags = flags;
+    self->borrowed_edges = false;
     self->num_edges = tables->edges.num_rows;
     self->num_nodes = tables->nodes.num_rows;
     self->num_sites = tables->sites.num_rows;
@@ -281,21 +310,7 @@ matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tab
         goto out;
     }
 
-    self->left_index_edges = malloc(self->num_edges * sizeof(*self->left_index_edges));
-    self->right_index_edges = malloc(self->num_edges * sizeof(*self->right_index_edges));
-    self->sites.mutations = malloc(self->num_sites * sizeof(*self->sites.mutations));
-    self->sites.num_alleles = malloc(self->num_sites * sizeof(*self->sites.num_alleles));
-    self->sites.ancestral_state
-        = malloc(self->num_sites * sizeof(*self->sites.ancestral_state));
-    self->sites.position
-        = malloc((self->num_sites + 1) * sizeof(*self->sites.mutations));
-    if (self->left_index_edges == NULL || self->right_index_edges == NULL
-        || self->sites.mutations == NULL || self->sites.position == NULL
-        || self->sites.num_alleles == NULL || self->sites.ancestral_state == NULL) {
-        ret = TSI_ERR_NO_MEMORY;
-        goto out;
-    }
-    ret = tsi_blkalloc_init(&self->allocator, 65536);
+    ret = matcher_indexes_alloc_sites(self);
     if (ret != 0) {
         goto out;
     }
@@ -304,8 +319,9 @@ matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tab
     if (ret != 0) {
         goto out;
     }
-    ret = matcher_indexes_copy_mutation_data(
-        self, tables, num_alleles, ancestral_state, derived_state);
+    ret = matcher_indexes_copy_mutation_data(self, tables->sites.position,
+        tables->sequence_length, tables->mutations.num_rows, tables->mutations.site,
+        tables->mutations.node, num_alleles, ancestral_state, derived_state);
     if (ret != 0) {
         goto out;
     }
@@ -314,10 +330,72 @@ out:
 }
 
 int
+matcher_indexes_alloc_prepared(matcher_indexes_t *self, size_t num_nodes,
+    size_t num_edges, const edge_t *insertion, const edge_t *removal, size_t num_sites,
+    const double *positions, double sequence_length, size_t num_mutations,
+    const tsk_id_t *mutation_site, const tsk_id_t *mutation_node,
+    const tsk_size_t *num_alleles)
+{
+    int ret;
+    size_t j, k;
+    const edge_t *edges;
+    bool root_is_parent;
+
+    self->num_nodes = num_nodes;
+    self->num_edges = num_edges;
+    self->num_sites = num_sites;
+    self->num_mutations = 0;
+    self->borrowed_edges = true;
+    self->left_index_edges = insertion;
+    self->right_index_edges = removal;
+
+    for (j = 0; j < num_mutations; j++) {
+        if (mutation_site[j] < 0 || mutation_site[j] >= (tsk_id_t) num_sites) {
+            ret = TSI_ERR_BAD_MUTATION_SITE;
+            goto out;
+        }
+        if (mutation_node[j] < 0 || mutation_node[j] >= (tsk_id_t) num_nodes) {
+            ret = TSI_ERR_BAD_MUTATION_NODE;
+            goto out;
+        }
+    }
+    for (k = 0; k < 2; k++) {
+        edges = k == 0 ? insertion : removal;
+        root_is_parent = false;
+        for (j = 0; j < num_edges; j++) {
+            if (edges[j].parent < 0 || edges[j].parent >= (tsk_id_t) num_nodes
+                || edges[j].child < 0 || edges[j].child >= (tsk_id_t) num_nodes) {
+                ret = TSI_ERR_BAD_EDGE_NODE;
+                goto out;
+            }
+            if (edges[j].child == 0) {
+                ret = TSI_ERR_NODE_0_NOT_ROOT;
+                goto out;
+            }
+            root_is_parent |= edges[j].parent == 0;
+        }
+        if (num_edges > 0 && !root_is_parent) {
+            ret = TSI_ERR_NODE_0_NOT_ROOT;
+            goto out;
+        }
+    }
+    ret = matcher_indexes_alloc_sites(self);
+    if (ret != 0) {
+        goto out;
+    }
+    ret = matcher_indexes_copy_mutation_data(self, positions, sequence_length,
+        num_mutations, mutation_site, mutation_node, num_alleles, NULL, NULL);
+out:
+    return ret;
+}
+
+int
 matcher_indexes_free(matcher_indexes_t *self)
 {
-    tsk_safe_free(self->left_index_edges);
-    tsk_safe_free(self->right_index_edges);
+    if (!self->borrowed_edges) {
+        tsk_safe_free(self->owned_left_index_edges);
+        tsk_safe_free(self->owned_right_index_edges);
+    }
     tsk_safe_free(self->sites.mutations);
     tsk_safe_free(self->sites.position);
     tsk_safe_free(self->sites.num_alleles);

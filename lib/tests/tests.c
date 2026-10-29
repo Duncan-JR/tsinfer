@@ -449,6 +449,67 @@ test_ancestor_builder_mmap(void)
 }
 
 static void
+test_matcher_indexes_borrowed(void)
+{
+    int ret;
+    matcher_indexes_t mi;
+    edge_t insertion[] = { { 0, 100, 0, 1 }, { 0, 100, 1, 2 } };
+    edge_t removal[] = { { 0, 100, 1, 2 }, { 0, 100, 0, 1 } };
+    double positions[] = { 10, 20 };
+    tsk_id_t mutation_site[] = { 0, 0 };
+    tsk_id_t mutation_node[] = { 2, 2 };
+    tsk_size_t num_alleles[] = { 2, 2 };
+    size_t mutations;
+
+    for (mutations = 0; mutations < 3; mutations++) {
+        memset(&mi, 0, sizeof(mi));
+        ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+            100, mutations, mutation_site, mutation_node, num_alleles);
+        CU_ASSERT_EQUAL_FATAL(ret, 0);
+        CU_ASSERT_PTR_EQUAL(mi.left_index_edges, insertion);
+        CU_ASSERT_PTR_EQUAL(mi.right_index_edges, removal);
+        CU_ASSERT_TRUE(mi.borrowed_edges);
+        CU_ASSERT_EQUAL(mi.sites.position[2], 100);
+        CU_ASSERT_EQUAL(mi.num_mutations, mutations);
+        CU_ASSERT_EQUAL(mi.sites.ancestral_state[0], 0);
+        CU_ASSERT_EQUAL(mi.sites.ancestral_state[1], 0);
+        matcher_indexes_free(&mi);
+    }
+    mutation_site[0] = 2;
+    memset(&mi, 0, sizeof(mi));
+    ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+        100, 1, mutation_site, mutation_node, num_alleles);
+    CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_MUTATION_SITE);
+    matcher_indexes_free(&mi);
+    mutation_site[0] = 0;
+    mutation_node[0] = 3;
+    memset(&mi, 0, sizeof(mi));
+    ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+        100, 1, mutation_site, mutation_node, num_alleles);
+    CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_MUTATION_NODE);
+    matcher_indexes_free(&mi);
+    insertion[0].parent = 3;
+    memset(&mi, 0, sizeof(mi));
+    ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+        100, 0, mutation_site, mutation_node, num_alleles);
+    CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_EDGE_NODE);
+    matcher_indexes_free(&mi);
+    insertion[0].parent = 1;
+    memset(&mi, 0, sizeof(mi));
+    ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+        100, 0, mutation_site, mutation_node, num_alleles);
+    CU_ASSERT_EQUAL(ret, TSI_ERR_NODE_0_NOT_ROOT);
+    matcher_indexes_free(&mi);
+    insertion[0].parent = 0;
+    removal[0].child = 0;
+    memset(&mi, 0, sizeof(mi));
+    ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+        100, 0, mutation_site, mutation_node, num_alleles);
+    CU_ASSERT_EQUAL(ret, TSI_ERR_NODE_0_NOT_ROOT);
+    matcher_indexes_free(&mi);
+}
+
+static void
 test_matcher_indexes_errors(void)
 {
     int ret;
@@ -1757,7 +1818,7 @@ check_matching_regions_mode(const tsk_treeseq_t *ts, int flags)
         rho[site] = 1e-3;
         mu[site] = 0;
     }
-    ret = matcher_indexes_alloc(&mi, ts->tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, ts->tables, NULL, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     ret = ancestor_matcher_alloc(
         &am, &mi, rho, mu, DBL_MIN, flags | TSI_EXTENDED_CHECKS);
@@ -1857,7 +1918,7 @@ check_matching_topology_reuse(const tsk_treeseq_t *ts)
         mu[j] = 0;
         h[j] = 1;
     }
-    ret = matcher_indexes_alloc(&mi, ts->tables, NULL, 0);
+    ret = matcher_indexes_alloc(&mi, ts->tables, NULL, NULL, NULL, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     ret = ancestor_matcher_alloc(
         &am, &mi, rho, mu, DBL_MIN, TSI_EXTENDED_CHECKS | TSI_REUSE_TOPOLOGY);
@@ -2114,6 +2175,7 @@ main(int argc, char **argv)
         { "test_ancestor_builder_one_bit_encoding",
             test_ancestor_builder_one_bit_encoding },
         { "test_ancestor_builder_mmap", test_ancestor_builder_mmap },
+        { "test_matcher_indexes_borrowed", test_matcher_indexes_borrowed },
         { "test_matcher_indexes_errors", test_matcher_indexes_errors },
         { "test_matcher_indexes_edge_node_out_of_bounds",
             test_matcher_indexes_edge_node_out_of_bounds },

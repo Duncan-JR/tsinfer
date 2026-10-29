@@ -7,6 +7,10 @@
 #include <structmember.h>
 #include <float.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <math.h>
 
 #include "lib/tsinfer.h"
 
@@ -29,6 +33,8 @@ typedef struct {
 typedef struct {
     PyObject_HEAD
     matcher_indexes_t *matcher_indexes;
+    PyObject *insertion_owner;
+    PyObject *removal_owner;
 } MatcherIndexes;
 
 typedef struct {
@@ -416,6 +422,8 @@ MatcherIndexes_dealloc(MatcherIndexes *self)
         PyMem_Free(self->matcher_indexes);
         self->matcher_indexes = NULL;
     }
+    Py_XDECREF(self->insertion_owner);
+    Py_XDECREF(self->removal_owner);
     Py_TYPE(self)->tp_free((PyObject *) self);
 }
 
@@ -544,7 +552,152 @@ out:
     return ret;
 }
 
+/* The prepared format is the native edge representation, not genomic doubles. */
+_Static_assert(sizeof(edge_t) == 4 * sizeof(int32_t), "edge_t must be four int32s");
+_Static_assert(offsetof(edge_t, left) == 0, "edge left offset");
+_Static_assert(offsetof(edge_t, right) == sizeof(int32_t), "edge right offset");
+_Static_assert(offsetof(edge_t, parent) == 2 * sizeof(int32_t), "edge parent offset");
+_Static_assert(offsetof(edge_t, child) == 3 * sizeof(int32_t), "edge child offset");
+
+static PyObject *
+MatcherIndexes_export_edge_indexes(MatcherIndexes *self, PyObject *Py_UNUSED(args))
+{
+    PyArrayObject *insertion = NULL, *removal = NULL;
+    PyObject *ret = NULL;
+    npy_intp shape[2];
+    size_t bytes;
+
+    if (MatcherIndexes_check_state(self) != 0) {
+        goto out;
+    }
+    shape[0] = (npy_intp) self->matcher_indexes->num_edges;
+    shape[1] = 4;
+    insertion = (PyArrayObject *) PyArray_SimpleNew(2, shape, NPY_INT32);
+    removal = (PyArrayObject *) PyArray_SimpleNew(2, shape, NPY_INT32);
+    if (insertion == NULL || removal == NULL) {
+        goto out;
+    }
+    bytes = self->matcher_indexes->num_edges * sizeof(edge_t);
+    if (bytes > 0) {
+        memcpy(PyArray_DATA(insertion), self->matcher_indexes->left_index_edges, bytes);
+        memcpy(PyArray_DATA(removal), self->matcher_indexes->right_index_edges, bytes);
+    }
+    PyArray_CLEARFLAGS(insertion, NPY_ARRAY_WRITEABLE);
+    PyArray_CLEARFLAGS(removal, NPY_ARRAY_WRITEABLE);
+    ret = Py_BuildValue("OO", insertion, removal);
+out:
+    Py_XDECREF(insertion);
+    Py_XDECREF(removal);
+    return ret;
+}
+
+static int
+prepared_array(PyArrayObject *array, int dtype, int ndim, bool readonly)
+{
+    if (PyArray_TYPE(array) != dtype || PyArray_NDIM(array) != ndim
+        || !PyArray_ISCARRAY_RO(array) || !PyArray_ISNOTSWAPPED(array)
+        || (readonly && PyArray_ISWRITEABLE(array))) {
+        PyErr_SetString(PyExc_ValueError,
+            "Prepared arrays require exact native dtype, contiguous aligned layout "
+            "and read-only edge buffers");
+        return -1;
+    }
+    return 0;
+}
+
+static PyObject *
+MatcherIndexes_from_prepared(PyObject *type, PyObject *args, PyObject *kwds)
+{
+    MatcherIndexes *self = NULL;
+    PyArrayObject *insertion, *removal, *positions, *mutation_site, *mutation_node;
+    PyArrayObject *num_alleles;
+    Py_ssize_t num_nodes;
+    double sequence_length;
+    npy_intp num_sites, num_edges, num_mutations, j;
+    int err;
+    static char *kwlist[] = { "insertion", "removal", "positions", "mutation_site",
+        "mutation_node", "num_alleles", "num_nodes", "sequence_length", NULL };
+
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O!O!O!O!O!nd", kwlist, &PyArray_Type,
+            &insertion, &PyArray_Type, &removal, &PyArray_Type, &positions,
+            &PyArray_Type, &mutation_site, &PyArray_Type, &mutation_node, &PyArray_Type,
+            &num_alleles, &num_nodes, &sequence_length)) {
+        return NULL;
+    }
+    if (prepared_array(insertion, NPY_INT32, 2, true) != 0
+        || prepared_array(removal, NPY_INT32, 2, true) != 0
+        || prepared_array(positions, NPY_FLOAT64, 1, false) != 0
+        || prepared_array(mutation_site, NPY_INT32, 1, false) != 0
+        || prepared_array(mutation_node, NPY_INT32, 1, false) != 0
+        || prepared_array(num_alleles, NPY_UINT64, 1, false) != 0) {
+        return NULL;
+    }
+    num_sites = PyArray_DIM(positions, 0);
+    num_edges = PyArray_DIM(insertion, 0);
+    num_mutations = PyArray_DIM(mutation_site, 0);
+    if (PyArray_DIM(insertion, 1) != 4 || PyArray_DIM(removal, 1) != 4
+        || PyArray_DIM(removal, 0) != num_edges
+        || PyArray_DIM(num_alleles, 0) != num_sites
+        || PyArray_DIM(mutation_node, 0) != num_mutations || num_nodes < 1
+        || num_nodes > INT32_MAX || num_edges > INT32_MAX || num_sites > INT32_MAX
+        || !isfinite(sequence_length) || sequence_length <= 0
+        || sequence_length > INT32_MAX) {
+        PyErr_SetString(PyExc_ValueError, "Invalid prepared input shapes or sizes");
+        return NULL;
+    }
+    for (j = 0; j < num_sites; j++) {
+        double pos = *(double *) PyArray_GETPTR1(positions, j);
+        if (!isfinite(pos) || pos < 0 || pos >= sequence_length
+            || (j > 0 && pos <= *(double *) PyArray_GETPTR1(positions, j - 1))) {
+            PyErr_SetString(PyExc_ValueError, "Invalid prepared site positions");
+            return NULL;
+        }
+    }
+    for (j = 1; j < num_mutations; j++) {
+        if (*(int32_t *) PyArray_GETPTR1(mutation_site, j)
+            < *(int32_t *) PyArray_GETPTR1(mutation_site, j - 1)) {
+            PyErr_SetString(PyExc_ValueError, "Prepared mutations must be site ordered");
+            return NULL;
+        }
+    }
+    self
+        = (MatcherIndexes *) ((PyTypeObject *) type)->tp_alloc((PyTypeObject *) type, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    self->matcher_indexes = PyMem_Calloc(1, sizeof(*self->matcher_indexes));
+    if (self->matcher_indexes == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    self->insertion_owner = (PyObject *) insertion;
+    self->removal_owner = (PyObject *) removal;
+    Py_INCREF(insertion);
+    Py_INCREF(removal);
+    err = matcher_indexes_alloc_prepared(self->matcher_indexes, (size_t) num_nodes,
+        (size_t) num_edges, PyArray_DATA(insertion), PyArray_DATA(removal),
+        (size_t) num_sites, PyArray_DATA(positions), sequence_length,
+        (size_t) num_mutations, PyArray_DATA(mutation_site), PyArray_DATA(mutation_node),
+        PyArray_DATA(num_alleles));
+    if (err != 0) {
+        handle_library_error(err);
+        goto error;
+    }
+    return (PyObject *) self;
+error:
+    Py_DECREF(self);
+    return NULL;
+}
+
 static PyMethodDef MatcherIndexes_methods[] = {
+    { "export_edge_indexes", (PyCFunction) MatcherIndexes_export_edge_indexes,
+        METH_NOARGS,
+        "Copy native insertion/removal orders as read-only (num_edges, 4) int32 arrays "
+        "in left/right/parent/child order." },
+    { "from_prepared", (PyCFunction) MatcherIndexes_from_prepared,
+        METH_CLASS | METH_VARARGS | METH_KEYWORDS,
+        "Borrow immutable native edge arrays; retain their owners until index "
+        "deletion." },
     { "print_state", (PyCFunction) MatcherIndexes_print_state, METH_VARARGS,
         "Low-level debug method" },
     { NULL } /* Sentinel */

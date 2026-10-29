@@ -177,8 +177,11 @@ typedef struct {
         tsk_size_t *num_alleles;
         allele_t *ancestral_state;
     } sites;
-    edge_t *left_index_edges;
-    edge_t *right_index_edges;
+    const edge_t *left_index_edges;
+    const edge_t *right_index_edges;
+    bool borrowed_edges;
+    edge_t *owned_left_index_edges;
+    edge_t *owned_right_index_edges;
     tsi_blkalloc_t allocator;
 } matcher_indexes_t;
 
@@ -236,6 +239,13 @@ size_t ancestor_builder_get_memsize(const ancestor_builder_t *self);
 int matcher_indexes_alloc(matcher_indexes_t *self, const tsk_table_collection_t *tables,
     const tsk_size_t *num_alleles, const allele_t *ancestral_state,
     const allele_t *derived_state, tsk_flags_t options);
+/* Borrow insertion/removal ordered edge buffers for this index's full lifetime.
+ * Only edge storage is shared; site/mutation data remains privately owned. */
+int matcher_indexes_alloc_prepared(matcher_indexes_t *self, size_t num_nodes,
+    size_t num_edges, const edge_t *insertion, const edge_t *removal, size_t num_sites,
+    const double *positions, double sequence_length, size_t num_mutations,
+    const tsk_id_t *mutation_site, const tsk_id_t *mutation_node,
+    const tsk_size_t *num_alleles);
 int matcher_indexes_print_state(const matcher_indexes_t *self, FILE *out);
 int matcher_indexes_free(matcher_indexes_t *self);
 

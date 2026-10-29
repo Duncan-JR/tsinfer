@@ -617,6 +617,43 @@ class MatcherIndexes(_tsinfer.MatcherIndexes):
             derived_state=derived_state,
         )
 
+    @classmethod
+    def from_prepared(
+        cls,
+        insertion,
+        removal,
+        positions,
+        mutation_site,
+        mutation_node,
+        num_alleles,
+        num_nodes,
+        sequence_length,
+    ):
+        """Borrow exported immutable edge orders without copying their buffers.
+
+        Edges must be native contiguous read-only ``int32[num_edges, 4]`` in
+        left/right/parent/child order from :meth:`export_edge_indexes`. Positions
+        are float64, mutation site/node IDs int32 and allele counts uint64.
+        Mutation columns are in tskit order. Ancestral alleles are encoded as
+        zero and mutation alleles as one. Node zero must be a root.
+        Site data is copied privately, including the terminal sequence length.
+        The index retains both edge arrays; do not close their backing mappings
+        until the index and every matcher using it have been released.
+        """
+        indexes = super().from_prepared(
+            insertion,
+            removal,
+            positions,
+            mutation_site,
+            mutation_node,
+            num_alleles,
+            num_nodes,
+            sequence_length,
+        )
+        indexes.sequence_length = sequence_length
+        indexes.num_sites = len(positions)
+        return indexes
+
 
 class AncestorMatcher(_tsinfer.AncestorMatcher):
     """Match independent regions, optionally retaining reference topology.
