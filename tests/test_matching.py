@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf
 import gc
+import itertools
 import multiprocessing as mp
 import weakref
 
@@ -1721,6 +1722,143 @@ class TestRegionalMatching:
         with pytest.raises(ValueError, match="0 <= start < end <= num_sites"):
             matcher.find_path(h, start, end, match_out)
         np.testing.assert_array_equal(match_out, -9)
+
+
+class TestBoundaryStates:
+    @pytest.fixture
+    def reference(self):
+        tables = tskit.TableCollection(6)
+        for time in [3, 2, 1, 1]:
+            tables.nodes.add_row(time=time)
+        for parent, child in [(0, 1), (1, 2), (1, 3)]:
+            tables.edges.add_row(0, 6, parent, child)
+        for position in range(6):
+            site = tables.sites.add_row(position, "0")
+            node = 2 if position in (0, 5) else 3
+            tables.mutations.add_row(site, node, "1")
+        tables.sort()
+        return tables.tree_sequence()
+
+    @pytest.fixture
+    def matcher(self, reference):
+        indexes = matching.MatcherIndexes(reference, vestigial_root=False)
+        return matching.AncestorMatcher(indexes, np.full(6, 0.01), np.full(6, 0.01))
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ([1, 1, 0, 0, 0, 1], [2, 2, 2, 2, 2, 2]),
+            ([1, 1, 1, 1, 1, 1], [2, 3, 3, 3, 3, 2]),
+        ],
+    )
+    def test_flanking_optimum(self, matcher, query, expected):
+        # Enumerate only the four interior sites using the native transition model.
+        alleles = np.array([[0] * 6, [1, 0, 0, 0, 0, 1], [0, 1, 1, 1, 1, 0]])
+        scores = {}
+        for interior in itertools.product(range(1, 4), repeat=4):
+            path = (2, *interior, 2)
+            score = 1.0
+            for site in range(1, 6):
+                transition = 1 - 0.01 + 0.01 / 4
+                if path[site] != path[site - 1]:
+                    transition = 0.01 / 4
+                emission = 0.01
+                if alleles[path[site] - 1, site] == query[site]:
+                    emission = 0.99
+                score *= transition * emission
+            scores[path] = score
+        optimum = max(scores.values())
+        assert [path for path, score in scores.items() if score == optimum] == [
+            tuple(expected)
+        ]
+        h = np.array(query, dtype=np.int8)
+        out = np.full(6, -9, dtype=np.int8)
+        left, right, parent = matcher.find_path(
+            h, 0, 6, out, initial_state=np.int64(2), final_state=2
+        )
+        observed = np.full(6, -1)
+        for lo, hi, node in zip(left, right, parent, strict=True):
+            observed[lo:hi] = node
+        np.testing.assert_array_equal(observed, expected)
+        np.testing.assert_array_equal(out, alleles[observed - 1, np.arange(6)])
+
+    def test_exact_internal_initial_and_compressed_final(self, matcher):
+        h = np.array([0, 1, 1, 1, 1, 0], dtype=np.int8)
+        out = np.full(6, -9, dtype=np.int8)
+        left, right, parent = matcher.find_path(h, 0, 6, out, initial_state=1)
+        np.testing.assert_array_equal(left, [1, 0])
+        np.testing.assert_array_equal(right, [6, 1])
+        np.testing.assert_array_equal(parent, [3, 1])
+        out[:] = -9
+        left, right, parent = matcher.find_path(h, 0, 1, out, final_state=3)
+        np.testing.assert_array_equal(left, [0])
+        np.testing.assert_array_equal(right, [1])
+        np.testing.assert_array_equal(parent, [3])
+        np.testing.assert_array_equal(out, [0, -9, -9, -9, -9, -9])
+
+    def test_one_site_gap_between_different_anchors(self, matcher):
+        h = np.ones(6, dtype=np.int8)
+        out = np.full(6, -9, dtype=np.int8)
+        left, right, parent = matcher.find_path(
+            h, 0, 3, out, initial_state=2, final_state=3
+        )
+        np.testing.assert_array_equal(left, [1, 0])
+        np.testing.assert_array_equal(right, [3, 1])
+        np.testing.assert_array_equal(parent, [3, 2])
+        np.testing.assert_array_equal(out, [1, 1, 1, -9, -9, -9])
+
+    def test_reuse_across_anchor_and_topology_change(self, reference):
+        tables = reference.dump_tables()
+        tables.edges.clear()
+        for left, right, ancestor in [(0, 1, 2), (1, 6, 3)]:
+            tables.edges.add_row(left, right, 0, 1)
+            tables.edges.add_row(left, right, 1, ancestor)
+        tables.sort()
+        indexes = matching.MatcherIndexes(tables.tree_sequence(), vestigial_root=False)
+        rho = np.full(6, 0.01)
+        mu = np.full(6, 0.01)
+        matcher = matching.AncestorMatcher(indexes, rho, mu, reuse_topology=True)
+        h = np.ones(6, dtype=np.int8)
+        # Node 2's support ends before the first observation after its anchor.
+        for start, end, kwargs in [
+            (0, 4, {"initial_state": 2, "final_state": 3}),
+            (3, 6, {"initial_state": 3}),
+            (0, 6, {}),
+        ]:
+            fresh = matching.AncestorMatcher(indexes, rho, mu)
+            out = np.full(6, -9, dtype=np.int8)
+            expected = out.copy()
+            path = matcher.find_path(h, start, end, out, **kwargs)
+            wanted = fresh.find_path(h, start, end, expected, **kwargs)
+            for actual, desired in zip(path, wanted, strict=True):
+                np.testing.assert_array_equal(actual, desired)
+            np.testing.assert_array_equal(out, expected)
+            if start == 0 and end == 4:
+                np.testing.assert_array_equal(path[0], [1, 0])
+                np.testing.assert_array_equal(path[1], [4, 1])
+                np.testing.assert_array_equal(path[2], [3, 2])
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"initial_state": -2},
+            {"final_state": 4},
+            {"initial_state": 0},
+            {"initial_state": 2, "final_state": 3},
+        ],
+    )
+    def test_bad_endpoints(self, matcher, kwargs):
+        h = np.ones(6, dtype=np.int8)
+        out = np.full(6, -9, dtype=np.int8)
+        with pytest.raises(_tsinfer.LibraryError, match="parent"):
+            matcher.find_path(h, 0, 1, out, **kwargs)
+        np.testing.assert_array_equal(out, -9)
+
+    @pytest.mark.parametrize("state", [1.5, 2**100])
+    def test_endpoint_conversion(self, matcher, state):
+        h = np.ones(6, dtype=np.int8)
+        with pytest.raises((TypeError, OverflowError)):
+            matcher.find_path(h, 0, 6, h.copy(), initial_state=state)
 
 
 class TestPreparedIndexes:

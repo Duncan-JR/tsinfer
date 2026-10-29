@@ -1004,9 +1004,10 @@ ancestor_matcher_unset_recombination_required(
 
 static int WARN_UNUSED
 ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
-    tsk_id_t *restrict parent, const allele_t *TSK_UNUSED(haplotype),
-    allele_t *restrict match, size_t *path_length_out, tsk_id_t *restrict path_left,
-    tsk_id_t *restrict path_right, tsk_id_t *restrict path_parent)
+    tsk_id_t final_state, tsk_id_t *restrict parent,
+    const allele_t *TSK_UNUSED(haplotype), allele_t *restrict match,
+    size_t *path_length_out, tsk_id_t *restrict path_left, tsk_id_t *restrict path_right,
+    tsk_id_t *restrict path_parent)
 {
     int ret = 0;
     tsk_id_t site;
@@ -1030,7 +1031,8 @@ ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_
     path_right[path_length] = end_pos;
     path_parent[path_length] = NULL_NODE;
 
-    max_likelihood_node = self->max_likelihood_node[end - 1];
+    max_likelihood_node
+        = final_state == TSK_NULL ? self->max_likelihood_node[end - 1] : final_state;
     assert(max_likelihood_node != NULL_NODE);
     path_parent[path_length] = max_likelihood_node;
     assert(path_parent[path_length] != NULL_NODE);
@@ -1133,8 +1135,8 @@ ancestor_matcher_run_traceback(ancestor_matcher_t *self, tsk_id_t start, tsk_id_
 }
 
 static int
-ancestor_matcher_run_forwards_match(
-    ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end, const allele_t *haplotype)
+ancestor_matcher_run_forwards_match(ancestor_matcher_t *self, tsk_id_t start,
+    tsk_id_t end, tsk_id_t initial_state, const allele_t *haplotype)
 {
     int ret = 0;
     tsk_id_t site;
@@ -1197,6 +1199,21 @@ ancestor_matcher_run_forwards_match(
     self->num_likelihood_nodes = 1;
 
     site = start;
+    if (initial_state != TSK_NULL) {
+        /* A point mass after the anchor observation. Explicit child zeros keep
+         * descendants from inheriting an internal node's initial mass. */
+        L[last_root] = 0;
+        if (initial_state != last_root) {
+            self->likelihood_nodes[self->num_likelihood_nodes++] = initial_state;
+        }
+        L[initial_state] = 1;
+        for (u = left_child[initial_state]; u != TSK_NULL; u = right_sib[u]) {
+            L[u] = 0;
+            self->likelihood_nodes[self->num_likelihood_nodes++] = u;
+        }
+        self->max_likelihood_node[start] = initial_state;
+        site++;
+    }
 
     remove_start = out_index;
     while (left < end_pos) {
@@ -1330,10 +1347,19 @@ out:
     return ret;
 }
 
+/* The vestigial node 0 is a copying state only when it has no copying root. */
+static bool
+ancestor_matcher_has_state(const ancestor_matcher_t *self, tsk_id_t node)
+{
+    return self->parent[node] != TSK_NULL
+           || (node == 0 && self->left_child[0] == TSK_NULL);
+}
+
 int
 ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t end,
-    const allele_t *haplotype, allele_t *matched_haplotype, size_t *path_length,
-    tsk_id_t *path_left, tsk_id_t *path_right, tsk_id_t *path_parent)
+    tsk_id_t initial_state, tsk_id_t final_state, const allele_t *haplotype,
+    allele_t *matched_haplotype, size_t *path_length, tsk_id_t *path_left,
+    tsk_id_t *path_right, tsk_id_t *path_parent)
 {
     int ret = 0;
     tsk_id_t *traceback_parent = self->parent;
@@ -1342,10 +1368,26 @@ ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t en
     if (ret != 0) {
         goto out;
     }
+    if (initial_state < TSK_NULL || initial_state >= (tsk_id_t) self->num_nodes
+        || final_state < TSK_NULL || final_state >= (tsk_id_t) self->num_nodes
+        || (end - start == 1 && initial_state != TSK_NULL && final_state != TSK_NULL
+            && initial_state != final_state)) {
+        ret = TSI_ERR_BAD_PATH_PARENT;
+        goto out;
+    }
     ancestor_matcher_prepare_topology(
         self, self->matcher_indexes->sites.position[start]);
-    ret = ancestor_matcher_run_forwards_match(self, start, end, haplotype);
+    if (initial_state != TSK_NULL && !ancestor_matcher_has_state(self, initial_state)) {
+        ret = TSI_ERR_BAD_PATH_PARENT;
+        goto out;
+    }
+    ret = ancestor_matcher_run_forwards_match(
+        self, start, end, initial_state, haplotype);
     if (ret != 0) {
+        goto out;
+    }
+    if (final_state != TSK_NULL && !ancestor_matcher_has_state(self, final_state)) {
+        ret = TSI_ERR_BAD_PATH_PARENT;
         goto out;
     }
     if (self->flags & TSI_REUSE_TOPOLOGY) {
@@ -1353,8 +1395,8 @@ ancestor_matcher_find_path(ancestor_matcher_t *self, tsk_id_t start, tsk_id_t en
         traceback_parent = self->node_scratch;
         memcpy(traceback_parent, self->parent, self->num_nodes * sizeof(*self->parent));
     }
-    ret = ancestor_matcher_run_traceback(self, start, end, traceback_parent, haplotype,
-        matched_haplotype, path_length, path_left, path_right, path_parent);
+    ret = ancestor_matcher_run_traceback(self, start, end, final_state, traceback_parent,
+        haplotype, matched_haplotype, path_length, path_left, path_right, path_parent);
     if (ret != 0) {
         goto out;
     }

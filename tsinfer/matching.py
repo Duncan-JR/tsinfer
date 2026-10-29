@@ -687,11 +687,26 @@ class AncestorMatcher(_tsinfer.AncestorMatcher):
             **kwargs,
         )
 
-    def find_path(self, h, start, end, match_out):
+    def find_path(
+        self, h, start, end, match_out, *, initial_state=None, final_state=None
+    ):
         """Match ``h[start:end]`` and write only ``match_out[start:end]``.
+
+        Bounds are half-open inference-site indexes. Independently optional
+        ``initial_state`` and ``final_state`` fix the copying node at ``start``
+        and ``end - 1``, respectively, using node IDs from the supplied
+        :class:`MatcherIndexes`. Conditioning assumes strictly positive
+        recombination and emission probabilities and retains the matcher's
+        existing numerical approximation.
 
         Values outside the requested slice of ``match_out`` remain unchanged.
         """
-        path_len, left, right, parent, matched = super().find_path(h, start, end)
+        if initial_state is None and final_state is None:
+            result = super().find_path(h, start, end)
+        else:
+            result = super().find_path(
+                h, start, end, initial_state=initial_state, final_state=final_state
+            )
+        path_len, left, right, parent, matched = result
         match_out[start:end] = matched[start:end]
         return left[:path_len], right[:path_len], parent[:path_len]

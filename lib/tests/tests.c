@@ -642,7 +642,7 @@ test_matching_multiple_mutations(void)
         CU_ASSERT_EQUAL_FATAL(ret, 0);
         h[0] = state;
         ret = ancestor_matcher_find_path(
-            &am, 0, 1, h, match, &path_length, left, right, parent);
+            &am, 0, 1, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
         CU_ASSERT_EQUAL_FATAL(ret, 0);
         CU_ASSERT_EQUAL(path_length, 1);
         CU_ASSERT_EQUAL(parent[0], expected_parent[state]);
@@ -1020,8 +1020,8 @@ run_match(const tsk_treeseq_t *ts, double rho, double mu, const allele_t *h,
         &am, &mi, recombination_rate, mutation_rate, DBL_MIN, 0);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
-    ret = ancestor_matcher_find_path(
-        &am, 0, (tsk_id_t) m, h, match, path_length, left, right, parent);
+    ret = ancestor_matcher_find_path(&am, 0, (tsk_id_t) m, TSK_NULL, TSK_NULL, h, match,
+        path_length, left, right, parent);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     /* ancestor_matcher_print_state(&am, stdout); */
 
@@ -1402,7 +1402,7 @@ test_matching_triallelic_ts(void)
     /* Query [2,0,0]: allele 2 at site 0 needs num_alleles >= 3 */
     allele_t h[] = { 2, 0, 0 };
     ret = ancestor_matcher_find_path(
-        &am, 0, 3, h, match, &path_length, left, right, parent);
+        &am, 0, 3, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     CU_ASSERT_EQUAL(path_length, 1);
 
@@ -1439,7 +1439,7 @@ test_matching_print_state(void)
 
     allele_t h[] = { 0, 1, 0 };
     ret = ancestor_matcher_find_path(
-        &am, 0, 3, h, match, &path_length, left, right, parent);
+        &am, 0, 3, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
     ancestor_matcher_print_state(&am, _devnull);
@@ -1475,7 +1475,7 @@ test_matching_extended_checks(void)
 
     allele_t h[] = { 1, 0, 0 };
     ret = ancestor_matcher_find_path(
-        &am, 0, 3, h, match, &path_length, left, right, parent);
+        &am, 0, 3, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
     CU_ASSERT_EQUAL(path_length, 1);
     CU_ASSERT_EQUAL(parent[0], 3);
@@ -1513,7 +1513,7 @@ test_matching_getters(void)
 
     allele_t h[] = { 0, 1, 0 };
     ret = ancestor_matcher_find_path(
-        &am, 0, 3, h, match, &path_length, left, right, parent);
+        &am, 0, 3, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL_FATAL(ret, 0);
 
     mean_tb = ancestor_matcher_get_mean_traceback_size(&am);
@@ -1553,7 +1553,7 @@ test_matching_bad_haplotype_allele(void)
     /* allele 2 at site 0 with default num_alleles=2 is out of range */
     allele_t h[] = { 2, 0, 0 };
     ret = ancestor_matcher_find_path(
-        &am, 0, 3, h, match, &path_length, left, right, parent);
+        &am, 0, 3, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_HAPLOTYPE_ALLELE);
 
     ancestor_matcher_free(&am);
@@ -1591,7 +1591,7 @@ test_matching_impossible_extreme_mu(void)
 
     allele_t h[] = { 0, 0, 1 };
     ret = ancestor_matcher_find_path(
-        &am, 0, 3, h, match, &path_length, left, right, parent);
+        &am, 0, 3, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL(ret, TSI_ERR_MATCH_IMPOSSIBLE_EXTREME_MUTATION_PROBA);
 
     ancestor_matcher_free(&am);
@@ -1636,7 +1636,7 @@ test_matching_impossible_zero_recomb(void)
      * With num_alleles=3, mu=0.5: p_e_match = 1-2*0.5 = 0 */
     allele_t h[] = { 0, 0, 0 };
     ret = ancestor_matcher_find_path(
-        &am, 0, 3, h, match, &path_length, left, right, parent);
+        &am, 0, 3, TSK_NULL, TSK_NULL, h, match, &path_length, left, right, parent);
     CU_ASSERT_EQUAL(ret, TSI_ERR_MATCH_IMPOSSIBLE_ZERO_RECOMB_PRECISION);
 
     ancestor_matcher_free(&am);
@@ -1838,8 +1838,8 @@ check_matching_regions_mode(const tsk_treeseq_t *ts, int flags)
             for (site = start; site < end; site++) {
                 h[site] = ts->tables->mutations.num_rows == 0 ? 0 : 1;
             }
-            ret = ancestor_matcher_find_path(
-                &am, start, end, h, match, &path_length, left, right, parent);
+            ret = ancestor_matcher_find_path(&am, start, end, TSK_NULL, TSK_NULL, h,
+                match, &path_length, left, right, parent);
             CU_ASSERT_EQUAL_FATAL(ret, 0);
             CU_ASSERT_TRUE_FATAL(path_length > 0);
             CU_ASSERT_EQUAL(
@@ -1951,8 +1951,8 @@ check_matching_topology_reuse(const tsk_treeseq_t *ts)
             /* Fail after several traceback records have been allocated. */
             h[4] = 7;
         }
-        ret = ancestor_matcher_find_path(
-            &am, starts[j], ends[j], h, match, &length, left, right, parent);
+        ret = ancestor_matcher_find_path(&am, starts[j], ends[j], TSK_NULL, TSK_NULL, h,
+            match, &length, left, right, parent);
         if (j == 6) {
             CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_HAPLOTYPE_ALLELE);
             CU_ASSERT_FALSE(am.topology_valid);
@@ -1966,8 +1966,8 @@ check_matching_topology_reuse(const tsk_treeseq_t *ts)
             continue;
         }
         CU_ASSERT_EQUAL_FATAL(ret, 0);
-        ret = ancestor_matcher_find_path(&independent, starts[j], ends[j], h,
-            expected_match, &expected_length, expected_left, expected_right,
+        ret = ancestor_matcher_find_path(&independent, starts[j], ends[j], TSK_NULL,
+            TSK_NULL, h, expected_match, &expected_length, expected_left, expected_right,
             expected_parent);
         CU_ASSERT_EQUAL_FATAL(ret, 0);
         CU_ASSERT_EQUAL_FATAL(length, expected_length);
@@ -1993,8 +1993,8 @@ check_matching_topology_reuse(const tsk_treeseq_t *ts)
             CU_ASSERT_TRUE(
                 mi.right_index_edges[am.forward_removal].right > am.topology_position);
         }
-        ret = ancestor_matcher_find_path(&independent, ends[j] - 1, ends[j], h,
-            expected_match, &expected_length, expected_left, expected_right,
+        ret = ancestor_matcher_find_path(&independent, ends[j] - 1, ends[j], TSK_NULL,
+            TSK_NULL, h, expected_match, &expected_length, expected_left, expected_right,
             expected_parent);
         CU_ASSERT_EQUAL_FATAL(ret, 0);
         for (k = 0; k < am.num_nodes; k++) {

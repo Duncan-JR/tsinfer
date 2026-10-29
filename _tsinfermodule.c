@@ -833,8 +833,13 @@ AncestorMatcher_find_path(AncestorMatcher *self, PyObject *args, PyObject *kwds)
 {
     int err;
     PyObject *ret = NULL;
-    static char *kwlist[] = { "haplotype", "start", "end", NULL };
+    static char *kwlist[]
+        = { "haplotype", "start", "end", "initial_state", "final_state", NULL };
     PyObject *haplotype = NULL;
+    PyObject *states[] = { Py_None, Py_None };
+    tsk_id_t boundary_states[] = { TSK_NULL, TSK_NULL };
+    long node;
+    int j;
     PyArrayObject *haplotype_array = NULL;
     npy_intp *shape;
     size_t num_edges;
@@ -848,13 +853,26 @@ AncestorMatcher_find_path(AncestorMatcher *self, PyObject *args, PyObject *kwds)
     if (AncestorMatcher_check_state(self) != 0) {
         goto out;
     }
-    if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "Oii", kwlist, &haplotype, &start, &end)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Oii|$OO", kwlist, &haplotype, &start,
+            &end, &states[0], &states[1])) {
         goto out;
     }
     if (start < 0 || start >= end || (size_t) end > self->ancestor_matcher->num_sites) {
         PyErr_SetString(PyExc_ValueError, "Require 0 <= start < end <= num_sites");
         goto out;
+    }
+    for (j = 0; j < 2; j++) {
+        if (states[j] != Py_None) {
+            node = PyLong_AsLong(states[j]);
+            if (node == -1 && PyErr_Occurred()) {
+                goto out;
+            }
+            if (node < 0 || (size_t) node >= self->ancestor_matcher->num_nodes) {
+                handle_library_error(TSI_ERR_BAD_PATH_PARENT);
+                goto out;
+            }
+            boundary_states[j] = (tsk_id_t) node;
+        }
     }
     haplotype_array
         = (PyArrayObject *) PyArray_FROM_OTF(haplotype, NPY_INT8, NPY_ARRAY_IN_ARRAY);
@@ -884,9 +902,9 @@ AncestorMatcher_find_path(AncestorMatcher *self, PyObject *args, PyObject *kwds)
 
     Py_BEGIN_ALLOW_THREADS
     err = ancestor_matcher_find_path(self->ancestor_matcher, (tsk_id_t) start,
-        (tsk_id_t) end, (allele_t *) PyArray_DATA(haplotype_array),
-        (allele_t *) PyArray_DATA(match), &num_edges, PyArray_DATA(left),
-        PyArray_DATA(right), PyArray_DATA(parent));
+        (tsk_id_t) end, boundary_states[0], boundary_states[1],
+        (allele_t *) PyArray_DATA(haplotype_array), (allele_t *) PyArray_DATA(match),
+        &num_edges, PyArray_DATA(left), PyArray_DATA(right), PyArray_DATA(parent));
     Py_END_ALLOW_THREADS
     if (err != 0) {
         handle_library_error(err);
