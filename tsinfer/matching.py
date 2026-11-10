@@ -628,6 +628,8 @@ class MatcherIndexes(_tsinfer.MatcherIndexes):
         num_alleles,
         num_nodes,
         sequence_length,
+        *,
+        derived_state=None,
     ):
         """Borrow exported immutable edge orders without copying their buffers.
 
@@ -635,7 +637,9 @@ class MatcherIndexes(_tsinfer.MatcherIndexes):
         left/right/parent/child order from :meth:`export_edge_indexes`. Positions
         are float64, mutation site/node IDs int32 and allele counts uint64.
         Mutation columns are in tskit order. Ancestral alleles are encoded as
-        zero and mutation alleles as one. Node zero must be a root.
+        zero. ``derived_state`` supplies int8 mutation codes, including reversions
+        to zero; when omitted, mutation alleles default to one. Node zero must
+        be a root.
         Site data is copied privately, including the terminal sequence length.
         The index retains both edge arrays; do not close their backing mappings
         until the index and every matcher using it have been released.
@@ -649,6 +653,7 @@ class MatcherIndexes(_tsinfer.MatcherIndexes):
             num_alleles,
             num_nodes,
             sequence_length,
+            derived_state=derived_state,
         )
         indexes.sequence_length = sequence_length
         indexes.num_sites = len(positions)

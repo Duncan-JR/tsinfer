@@ -610,18 +610,21 @@ MatcherIndexes_from_prepared(PyObject *type, PyObject *args, PyObject *kwds)
 {
     MatcherIndexes *self = NULL;
     PyArrayObject *insertion, *removal, *positions, *mutation_site, *mutation_node;
-    PyArrayObject *num_alleles;
+    PyArrayObject *num_alleles, *derived_state = NULL;
+    PyObject *derived_state_arg = Py_None;
     Py_ssize_t num_nodes;
     double sequence_length;
     npy_intp num_sites, num_edges, num_mutations, j;
     int err;
-    static char *kwlist[] = { "insertion", "removal", "positions", "mutation_site",
-        "mutation_node", "num_alleles", "num_nodes", "sequence_length", NULL };
+    static char *kwlist[]
+        = { "insertion", "removal", "positions", "mutation_site", "mutation_node",
+              "num_alleles", "num_nodes", "sequence_length", "derived_state", NULL };
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O!O!O!O!O!nd", kwlist, &PyArray_Type,
-            &insertion, &PyArray_Type, &removal, &PyArray_Type, &positions,
-            &PyArray_Type, &mutation_site, &PyArray_Type, &mutation_node, &PyArray_Type,
-            &num_alleles, &num_nodes, &sequence_length)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O!O!O!O!O!O!nd|O", kwlist,
+            &PyArray_Type, &insertion, &PyArray_Type, &removal, &PyArray_Type,
+            &positions, &PyArray_Type, &mutation_site, &PyArray_Type, &mutation_node,
+            &PyArray_Type, &num_alleles, &num_nodes, &sequence_length,
+            &derived_state_arg)) {
         return NULL;
     }
     if (prepared_array(insertion, NPY_INT32, 2, true) != 0
@@ -631,6 +634,20 @@ MatcherIndexes_from_prepared(PyObject *type, PyObject *args, PyObject *kwds)
         || prepared_array(mutation_node, NPY_INT32, 1, false) != 0
         || prepared_array(num_alleles, NPY_UINT64, 1, false) != 0) {
         return NULL;
+    }
+    if (derived_state_arg != Py_None) {
+        if (!PyArray_Check(derived_state_arg)) {
+            PyErr_SetString(PyExc_TypeError, "derived_state must be a numpy array");
+            return NULL;
+        }
+        derived_state = (PyArrayObject *) derived_state_arg;
+        if (prepared_array(derived_state, NPY_INT8, 1, false) != 0) {
+            return NULL;
+        }
+        if (PyArray_DIM(derived_state, 0) != PyArray_DIM(mutation_site, 0)) {
+            PyErr_SetString(PyExc_ValueError, "Prepared mutation state count differs");
+            return NULL;
+        }
     }
     num_sites = PyArray_DIM(positions, 0);
     num_edges = PyArray_DIM(insertion, 0);
@@ -678,7 +695,8 @@ MatcherIndexes_from_prepared(PyObject *type, PyObject *args, PyObject *kwds)
         (size_t) num_edges, PyArray_DATA(insertion), PyArray_DATA(removal),
         (size_t) num_sites, PyArray_DATA(positions), sequence_length,
         (size_t) num_mutations, PyArray_DATA(mutation_site), PyArray_DATA(mutation_node),
-        PyArray_DATA(num_alleles));
+        PyArray_DATA(num_alleles),
+        derived_state == NULL ? NULL : PyArray_DATA(derived_state));
     if (err != 0) {
         handle_library_error(err);
         goto error;

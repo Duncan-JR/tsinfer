@@ -334,7 +334,7 @@ matcher_indexes_alloc_prepared(matcher_indexes_t *self, size_t num_nodes,
     size_t num_edges, const edge_t *insertion, const edge_t *removal, size_t num_sites,
     const double *positions, double sequence_length, size_t num_mutations,
     const tsk_id_t *mutation_site, const tsk_id_t *mutation_node,
-    const tsk_size_t *num_alleles)
+    const tsk_size_t *num_alleles, const allele_t *derived_state)
 {
     int ret;
     size_t j, k;
@@ -384,7 +384,7 @@ matcher_indexes_alloc_prepared(matcher_indexes_t *self, size_t num_nodes,
         goto out;
     }
     ret = matcher_indexes_copy_mutation_data(self, positions, sequence_length,
-        num_mutations, mutation_site, mutation_node, num_alleles, NULL, NULL);
+        num_mutations, mutation_site, mutation_node, num_alleles, NULL, derived_state);
 out:
     return ret;
 }

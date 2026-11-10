@@ -460,11 +460,12 @@ test_matcher_indexes_borrowed(void)
     tsk_id_t mutation_node[] = { 2, 2 };
     tsk_size_t num_alleles[] = { 2, 2 };
     size_t mutations;
+    allele_t derived_state[] = { 1, 0 };
 
     for (mutations = 0; mutations < 3; mutations++) {
         memset(&mi, 0, sizeof(mi));
         ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
-            100, mutations, mutation_site, mutation_node, num_alleles);
+            100, mutations, mutation_site, mutation_node, num_alleles, NULL);
         CU_ASSERT_EQUAL_FATAL(ret, 0);
         CU_ASSERT_PTR_EQUAL(mi.left_index_edges, insertion);
         CU_ASSERT_PTR_EQUAL(mi.right_index_edges, removal);
@@ -475,36 +476,49 @@ test_matcher_indexes_borrowed(void)
         CU_ASSERT_EQUAL(mi.sites.ancestral_state[1], 0);
         matcher_indexes_free(&mi);
     }
+    memset(&mi, 0, sizeof(mi));
+    ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+        100, 2, mutation_site, mutation_node, num_alleles, derived_state);
+    CU_ASSERT_EQUAL_FATAL(ret, 0);
+    CU_ASSERT_EQUAL(mi.sites.mutations[0]->derived_state, 1);
+    CU_ASSERT_EQUAL(mi.sites.mutations[0]->next->derived_state, 0);
+    matcher_indexes_free(&mi);
+    derived_state[1] = 2;
+    memset(&mi, 0, sizeof(mi));
+    ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
+        100, 2, mutation_site, mutation_node, num_alleles, derived_state);
+    CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_MUTATION_DERIVED_STATE);
+    matcher_indexes_free(&mi);
     mutation_site[0] = 2;
     memset(&mi, 0, sizeof(mi));
     ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
-        100, 1, mutation_site, mutation_node, num_alleles);
+        100, 1, mutation_site, mutation_node, num_alleles, NULL);
     CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_MUTATION_SITE);
     matcher_indexes_free(&mi);
     mutation_site[0] = 0;
     mutation_node[0] = 3;
     memset(&mi, 0, sizeof(mi));
     ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
-        100, 1, mutation_site, mutation_node, num_alleles);
+        100, 1, mutation_site, mutation_node, num_alleles, NULL);
     CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_MUTATION_NODE);
     matcher_indexes_free(&mi);
     insertion[0].parent = 3;
     memset(&mi, 0, sizeof(mi));
     ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
-        100, 0, mutation_site, mutation_node, num_alleles);
+        100, 0, mutation_site, mutation_node, num_alleles, NULL);
     CU_ASSERT_EQUAL(ret, TSI_ERR_BAD_EDGE_NODE);
     matcher_indexes_free(&mi);
     insertion[0].parent = 1;
     memset(&mi, 0, sizeof(mi));
     ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
-        100, 0, mutation_site, mutation_node, num_alleles);
+        100, 0, mutation_site, mutation_node, num_alleles, NULL);
     CU_ASSERT_EQUAL(ret, TSI_ERR_NODE_0_NOT_ROOT);
     matcher_indexes_free(&mi);
     insertion[0].parent = 0;
     removal[0].child = 0;
     memset(&mi, 0, sizeof(mi));
     ret = matcher_indexes_alloc_prepared(&mi, 3, 2, insertion, removal, 2, positions,
-        100, 0, mutation_site, mutation_node, num_alleles);
+        100, 0, mutation_site, mutation_node, num_alleles, NULL);
     CU_ASSERT_EQUAL(ret, TSI_ERR_NODE_0_NOT_ROOT);
     matcher_indexes_free(&mi);
 }

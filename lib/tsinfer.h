@@ -245,7 +245,7 @@ int matcher_indexes_alloc_prepared(matcher_indexes_t *self, size_t num_nodes,
     size_t num_edges, const edge_t *insertion, const edge_t *removal, size_t num_sites,
     const double *positions, double sequence_length, size_t num_mutations,
     const tsk_id_t *mutation_site, const tsk_id_t *mutation_node,
-    const tsk_size_t *num_alleles);
+    const tsk_size_t *num_alleles, const allele_t *derived_state);
 int matcher_indexes_print_state(const matcher_indexes_t *self, FILE *out);
 int matcher_indexes_free(matcher_indexes_t *self);
 

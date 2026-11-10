@@ -1862,6 +1862,58 @@ class TestBoundaryStates:
 
 
 class TestPreparedIndexes:
+    @pytest.mark.parametrize(
+        ("states", "error"),
+        [
+            ([1, 1], TypeError),
+            (np.ones(1, dtype=np.int8), ValueError),
+            (np.ones(2, dtype=np.int16), ValueError),
+            (np.full(2, 2, dtype=np.int8), _tsinfer.LibraryError),
+        ],
+    )
+    def test_invalid_mutation_states(self, prepared, states, error):
+        with pytest.raises(error):
+            matching.MatcherIndexes.from_prepared(**prepared, derived_state=states)
+
+    def test_back_mutations(self, reference):
+        tables = reference.dump_tables()
+        tables.mutations.clear()
+        for site in range(reference.num_sites):
+            tables.mutations.add_row(site, 1, "T")
+            if site == 1:
+                tables.mutations.add_row(site, 2, "A")
+        tables.sort()
+        tables.build_index()
+        tables.compute_mutation_parents()
+        reference = tables.tree_sequence()
+        states = (reference.mutations_derived_state != "A").astype(np.int8)
+        owned = matching.MatcherIndexes(
+            reference, vestigial_root=False, derived_state=states
+        )
+        insertion, removal = owned.export_edge_indexes()
+        borrowed = matching.MatcherIndexes.from_prepared(
+            insertion,
+            removal,
+            reference.sites_position,
+            reference.mutations_site,
+            reference.mutations_node,
+            np.full(reference.num_sites, 2, dtype=np.uint64),
+            reference.num_nodes,
+            reference.sequence_length,
+            derived_state=states,
+        )
+        haplotype = np.array([1, 0, 1], dtype=np.int8)
+        paths = []
+        for indexes in (owned, borrowed):
+            matcher = matching.AncestorMatcher(
+                indexes, np.full(3, 1e-3), np.full(3, 1e-20), reuse_topology=True
+            )
+            out = np.empty(3, dtype=np.int8)
+            paths.append(matcher.find_path(haplotype, 0, 3, out))
+            np.testing.assert_array_equal(out, haplotype)
+        for owned_path, borrowed_path in zip(*paths):
+            np.testing.assert_array_equal(owned_path, borrowed_path)
+
     @pytest.fixture
     def reference(self):
         tables = tskit.TableCollection(20)
