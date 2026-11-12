@@ -22,18 +22,14 @@ Tests for tsinfer.matching: make_root_ts, Matcher, extend_ts.
 
 from __future__ import annotations
 
-import concurrent.futures as cf
-import gc
-import itertools
-import multiprocessing as mp
-import weakref
+import logging
+import re
 
 import msprime
 import numpy as np
 import pytest
 import tskit
 
-import _tsinfer
 from tsinfer import config, matching, vcz
 
 # ---------------------------------------------------------------------------
@@ -44,8 +40,10 @@ from tsinfer import config, matching, vcz
 def _make_simple_ts(positions, sequence_length, node_times, haplotypes, allele_mapper):
     """
     Build a minimal tree sequence with one node per haplotype, connected to a
-    virtual root (node 0, time=1.0) via edges spanning all sites, with
-    mutations where the haplotype has value 1.
+    virtual root (node 1, time=1.0) via edges spanning all sites, with
+    mutations where the haplotype has value 1. As in tsinfer, node 0 is the
+    ultimate root (time=2.0), whose only child is the virtual root, so the
+    haplotype nodes are numbered from 2.
 
     positions: (num_sites,) int array
     node_times: (n_nodes,) float array (excluding root)
@@ -59,15 +57,19 @@ def _make_simple_ts(positions, sequence_length, node_times, haplotypes, allele_m
     ancestral = allele_mapper.ancestral_alleles()
     for i, pos in enumerate(positions):
         tables.sites.add_row(position=float(pos), ancestral_state=str(ancestral[i]))
-    # node 0 = virtual root
+    # node 0 = ultimate root, node 1 = virtual root
+    tables.nodes.add_row(time=2.0, flags=0, metadata={})
     tables.nodes.add_row(time=1.0, flags=0, metadata={})
+    tables.edges.add_row(
+        left=float(positions[0]), right=float(sequence_length), parent=0, child=1
+    )
     for time, hap in zip(node_times, haplotypes):
         node_id = tables.nodes.add_row(time=float(time), flags=0, metadata={})
         # single edge spanning full sequence
         tables.edges.add_row(
             left=float(positions[0]),
             right=float(sequence_length),
-            parent=0,
+            parent=1,
             child=node_id,
         )
         # mutations where hap == 1
@@ -869,6 +871,20 @@ class TestMatcher:
             assert isinstance(m.position, float)
             assert isinstance(m.derived_state, int)
 
+    def test_debug_log_timings(self, caplog):
+        """Each match logs the time to create the HMM, read and match."""
+        hap = np.array([0, 1, 0], dtype=np.int8)
+        ts = self._make_ts_with_one_ancestor(hap)
+        matcher = matching.Matcher(
+            ts,
+            self.positions,
+            allele_mapper=self.allele_mapper,
+            hmm_parameters=_hmm_params(self.positions),
+        )
+        with caplog.at_level(logging.DEBUG, logger="tsinfer.matching"):
+            list(matcher.match(_jobs(1), _ArrayReader([hap])))
+        assert re.search(r"Matched job 0: init=\S+s read=\S+s match=\S+s", caplog.text)
+
     def test_match_with_custom_recombination_and_mismatch(self):
         """Custom per-source recombination/mismatch overrides are used."""
         hap = np.array([0, 1, 0], dtype=np.int8)
@@ -900,7 +916,7 @@ class TestMatcher:
         a = tables.nodes.add_row(time=0.8, flags=0, metadata={})
         b = tables.nodes.add_row(time=0.8, flags=0, metadata={})
         for child in [a, b]:
-            tables.edges.add_row(left=10, right=self.seq_len, parent=1, child=child)
+            tables.edges.add_row(left=10, right=self.seq_len, parent=2, child=child)
         for site, node in [(0, a), (1, a), (2, b)]:
             tables.mutations.add_row(site=site, node=node, derived_state="T")
         tables.sort()
@@ -1021,7 +1037,7 @@ class TestMatcherMultiallelic:
     def test_unknown_derived_state(self):
         tables = self._make_ts([[0, 0, 0]]).dump_tables()
         tables.mutations.add_row(site=1, node=2, derived_state="X")
-        with pytest.raises(_tsinfer.LibraryError, match="derived state"):
+        with pytest.raises(ValueError, match="not in its site's list of alleles"):
             matching.Matcher(
                 tables.tree_sequence(),
                 self.positions,
@@ -1495,568 +1511,3 @@ class TestMatcherExtendCycle:
         )
         assert "sequence_intervals" in ts2.metadata
         assert ts2.metadata["sequence_intervals"] == [[10, 51]]
-
-
-# ---------------------------------------------------------------------------
-# TestAncestorMatcherWrapper
-# ---------------------------------------------------------------------------
-
-
-class TestAncestorMatcherWrapper:
-    @pytest.fixture
-    def single_tree(self):
-        tables = tskit.Tree.generate_balanced(4).tree_sequence.dump_tables()
-        tables.sequence_length = 100
-        tables.edges.right = np.full(len(tables.edges), 100, dtype=np.float64)
-        for position in [10, 20, 30, 40]:
-            site = tables.sites.add_row(position=position, ancestral_state="A")
-            tables.mutations.add_row(site=site, node=1, derived_state="T")
-        return tables.tree_sequence()
-
-    @pytest.mark.parametrize(("start", "end"), [(0, 4), (1, 3), (0, 1), (3, 4)])
-    def test_output_slice(self, single_tree, start, end):
-        indexes = matching.MatcherIndexes(single_tree)
-        rho = np.full(single_tree.num_sites, 1e-9)
-        mu = np.zeros(single_tree.num_sites)
-        matcher = matching.AncestorMatcher(indexes, rho, mu)
-        h = np.ones(single_tree.num_sites, dtype=np.int8)
-        match_out = np.full(single_tree.num_sites, -9, dtype=np.int8)
-        left, right, parent = matcher.find_path(h, start, end, match_out)
-        np.testing.assert_array_equal(match_out[start:end], h[start:end])
-        np.testing.assert_array_equal(match_out[:start], -9)
-        np.testing.assert_array_equal(match_out[end:], -9)
-        np.testing.assert_array_equal(left, [0 if start == 0 else 10 * (start + 1)])
-        np.testing.assert_array_equal(right, [100 if end == 4 else 10 * (end + 1)])
-        np.testing.assert_array_equal(parent, [2])
-
-    def test_optional_kwargs(self):
-        ts = tskit.Tree.generate_balanced(4).tree_sequence
-        tables = ts.dump_tables()
-        tables.sequence_length = 2
-        tables.edges.right = np.full(len(tables.edges), 2, dtype=np.float64)
-        tables.sites.add_row(position=1, ancestral_state="A")
-        tables.mutations.add_row(site=0, node=1, derived_state="T")
-        ts = tables.tree_sequence()
-        mi = matching.MatcherIndexes(ts)
-        r = np.full(ts.num_sites, 1e-9)
-        m = np.full(ts.num_sites, 0.0)
-        am = matching.AncestorMatcher(
-            mi, r, m, likelihood_threshold=1e-10, weight_by_n=False
-        )
-        assert am is not None
-
-    @pytest.mark.parametrize(("start", "end"), [(1, 2), (0, 4)])
-    def test_native_path_capacity(self, single_tree, start, end):
-        indexes = matching.MatcherIndexes(single_tree)
-        rho = np.full(single_tree.num_sites, 1e-9)
-        mu = np.zeros(single_tree.num_sites)
-        matcher = _tsinfer.AncestorMatcher(indexes, rho, mu)
-        h = np.ones(single_tree.num_sites, dtype=np.int8)
-        length, left, right, parent, matched = matcher.find_path(h, start, end)
-        assert length == 1
-        for array, dtype in [(left, np.uint32), (right, np.uint32), (parent, np.int32)]:
-            assert array.shape == (end - start,)
-            assert array.dtype == dtype
-        assert matched.shape == (single_tree.num_sites,)
-        assert matched.dtype == np.int8
-        np.testing.assert_array_equal(left[:length], [0 if start == 0 else 20])
-        np.testing.assert_array_equal(right[:length], [100 if end == 4 else 30])
-        np.testing.assert_array_equal(parent[:length], [2])
-        np.testing.assert_array_equal(matched[start:end], h[start:end])
-
-
-def _match_prepared_files(spec):
-    arrays = [np.load(path, mmap_mode="r", allow_pickle=False) for path in spec["paths"]]
-    indexes = matching.MatcherIndexes.from_prepared(
-        *arrays, spec["num_nodes"], spec["sequence_length"]
-    )
-    n = indexes.num_sites
-    matcher = matching.AncestorMatcher(
-        indexes, np.full(n, 1e-3), np.zeros(n), reuse_topology=True
-    )
-    out = np.full(n, -9, dtype=np.int8)
-    h = np.array([1, 0, 1], dtype=np.int8)
-    path = matcher.find_path(h, 0, n, out)
-    return path, out
-
-
-class TestRegionalMatching:
-    @pytest.fixture(params=[False, True])
-    def reuse_topology(self, request):
-        return request.param
-
-    @pytest.fixture(params=[0, 15])
-    def reference(self, request):
-        tables = tskit.TableCollection(100)
-        for time in [5, 4, 3, 2, 1]:
-            tables.nodes.add_row(time=time)
-        for left in range(0, 100, 10):
-            root = (left // 10) % 2 + 1
-            tables.edges.add_row(left, left + 10, 0, root)
-            for child in [3, 4]:
-                tables.edges.add_row(left, left + 10, root, child)
-        positions = [request.param, 20, 21, 25, 45, 60, 61, 75, 95]
-        for j, position in enumerate(positions):
-            site = tables.sites.add_row(position=position, ancestral_state="A")
-            tables.mutations.add_row(site=site, node=j % 2 + 3, derived_state="T")
-        tables.sort()
-        return tables.tree_sequence()
-
-    @pytest.fixture(params=["owned", "borrowed"])
-    def index_factory(self, request):
-        def build(reference):
-            owned = matching.MatcherIndexes(reference, vestigial_root=False)
-            if request.param == "owned":
-                return owned
-            insertion, removal = owned.export_edge_indexes()
-            return matching.MatcherIndexes.from_prepared(
-                insertion,
-                removal,
-                reference.sites_position,
-                reference.mutations_site,
-                reference.mutations_node,
-                np.full(reference.num_sites, 2, dtype=np.uint64),
-                reference.num_nodes,
-                reference.sequence_length,
-            )
-
-        return build
-
-    @pytest.fixture
-    def indexes(self, reference, index_factory):
-        return index_factory(reference)
-
-    @pytest.fixture
-    def matcher(self, reference, indexes, reuse_topology):
-        rho = np.full(reference.num_sites, 1e-3)
-        mu = np.zeros(reference.num_sites)
-        return matching.AncestorMatcher(indexes, rho, mu, reuse_topology=reuse_topology)
-
-    def test_all_regions(self, reference, matcher):
-        positions = np.append(reference.sites_position, reference.sequence_length)
-        # A derived call at every site forces alternating copying parents.
-        # This also checks cursor handoff through trees without observations.
-        for start in reversed(range(reference.num_sites)):
-            for end in range(start + 1, reference.num_sites + 1):
-                h = np.full(reference.num_sites, 7, dtype=np.int8)
-                h[start:end] = 1
-                match_out = np.full(reference.num_sites, -9, dtype=np.int8)
-                left, right, parent = matcher.find_path(h, start, end, match_out)
-                expected_left = positions[start:end].copy()
-                if start == 0:
-                    expected_left[0] = 0
-                expected_right = positions[start + 1 : end + 1]
-                site_ids = np.arange(start, end)
-                expected_parent = site_ids % 2 + 3
-                np.testing.assert_array_equal(left, expected_left[::-1])
-                np.testing.assert_array_equal(right, expected_right[::-1])
-                np.testing.assert_array_equal(parent, expected_parent[::-1])
-                np.testing.assert_array_equal(match_out[start:end], 1)
-                np.testing.assert_array_equal(match_out[:start], -9)
-                np.testing.assert_array_equal(match_out[end:], -9)
-
-    @pytest.mark.parametrize("missing", [False, True])
-    def test_outside_observations_and_reuse(self, reference, indexes, matcher, missing):
-        rng = np.random.default_rng(1234)
-        regions = [(start, end) for start in range(9) for end in range(start + 1, 10)]
-        rng.shuffle(regions)
-        rho = np.full(reference.num_sites, 1e-3)
-        mu = np.zeros(reference.num_sites)
-        for start, end in regions:
-            h = np.ones(reference.num_sites, dtype=np.int8)
-            if missing:
-                h[::3] = tskit.MISSING_DATA
-            fresh = matching.AncestorMatcher(indexes, rho, mu)
-            expected = np.full(reference.num_sites, -9, dtype=np.int8)
-            expected_path = fresh.find_path(h, start, end, expected)
-            for outside in [0, 1, tskit.MISSING_DATA, 7]:
-                changed = h.copy()
-                changed[:start] = outside
-                changed[end:] = outside
-                observed = np.full(reference.num_sites, -9, dtype=np.int8)
-                path = matcher.find_path(changed, start, end, observed)
-                for actual, wanted in zip(path, expected_path):
-                    np.testing.assert_array_equal(actual, wanted)
-                np.testing.assert_array_equal(observed, expected)
-
-    def test_match_impossible_is_regional(
-        self, reference, reuse_topology, index_factory
-    ):
-        tables = reference.dump_tables()
-        tables.mutations.clear()
-        indexes = index_factory(tables.tree_sequence())
-        rho = np.full(reference.num_sites, 1e-3)
-        mu = np.zeros(reference.num_sites)
-        matcher = matching.AncestorMatcher(
-            indexes, rho, mu, reuse_topology=reuse_topology
-        )
-        h = np.zeros(reference.num_sites, dtype=np.int8)
-        h[4] = 1
-        match_out = np.full(reference.num_sites, -9, dtype=np.int8)
-        matcher.find_path(h, 0, 4, match_out)
-        matcher.find_path(h, 5, 9, match_out)
-        with pytest.raises(_tsinfer.MatchImpossible):
-            matcher.find_path(h, 4, 5, match_out)
-        # Resetting the matcher after an error must also allow another region.
-        matcher.find_path(h, 2, 3, match_out)
-        assert match_out[2] == 0
-        assert match_out[4] == -9
-
-    def test_reset_topology(self, reference, matcher):
-        h = np.ones(reference.num_sites, dtype=np.int8)
-        match_out = np.full(reference.num_sites, -9, dtype=np.int8)
-        expected = matcher.find_path(h, 2, 4, match_out)
-        matcher.find_path(h, 5, 9, match_out)
-        assert matcher.reset_topology() is None
-        actual = matcher.find_path(h, 2, 4, match_out)
-        for observed, wanted in zip(actual, expected):
-            np.testing.assert_array_equal(observed, wanted)
-        np.testing.assert_array_equal(match_out[2:4], 1)
-
-    @pytest.mark.parametrize(
-        ("start", "end"), [(-1, 1), (0, 0), (2, 1), (0, 10), (9, 10), (0, -1)]
-    )
-    def test_invalid_bounds(self, reference, matcher, start, end):
-        h = np.ones(reference.num_sites, dtype=np.int8)
-        match_out = np.full(reference.num_sites, -9, dtype=np.int8)
-        with pytest.raises(ValueError, match="0 <= start < end <= num_sites"):
-            matcher.find_path(h, start, end, match_out)
-        np.testing.assert_array_equal(match_out, -9)
-
-
-class TestBoundaryStates:
-    @pytest.fixture
-    def reference(self):
-        tables = tskit.TableCollection(6)
-        for time in [3, 2, 1, 1]:
-            tables.nodes.add_row(time=time)
-        for parent, child in [(0, 1), (1, 2), (1, 3)]:
-            tables.edges.add_row(0, 6, parent, child)
-        for position in range(6):
-            site = tables.sites.add_row(position, "0")
-            node = 2 if position in (0, 5) else 3
-            tables.mutations.add_row(site, node, "1")
-        tables.sort()
-        return tables.tree_sequence()
-
-    @pytest.fixture
-    def matcher(self, reference):
-        indexes = matching.MatcherIndexes(reference, vestigial_root=False)
-        return matching.AncestorMatcher(indexes, np.full(6, 0.01), np.full(6, 0.01))
-
-    @pytest.mark.parametrize(
-        ("query", "expected"),
-        [
-            ([1, 1, 0, 0, 0, 1], [2, 2, 2, 2, 2, 2]),
-            ([1, 1, 1, 1, 1, 1], [2, 3, 3, 3, 3, 2]),
-        ],
-    )
-    def test_flanking_optimum(self, matcher, query, expected):
-        # Enumerate only the four interior sites using the native transition model.
-        alleles = np.array([[0] * 6, [1, 0, 0, 0, 0, 1], [0, 1, 1, 1, 1, 0]])
-        scores = {}
-        for interior in itertools.product(range(1, 4), repeat=4):
-            path = (2, *interior, 2)
-            score = 1.0
-            for site in range(1, 6):
-                transition = 1 - 0.01 + 0.01 / 4
-                if path[site] != path[site - 1]:
-                    transition = 0.01 / 4
-                emission = 0.01
-                if alleles[path[site] - 1, site] == query[site]:
-                    emission = 0.99
-                score *= transition * emission
-            scores[path] = score
-        optimum = max(scores.values())
-        assert [path for path, score in scores.items() if score == optimum] == [
-            tuple(expected)
-        ]
-        h = np.array(query, dtype=np.int8)
-        out = np.full(6, -9, dtype=np.int8)
-        left, right, parent = matcher.find_path(
-            h, 0, 6, out, initial_state=np.int64(2), final_state=2
-        )
-        observed = np.full(6, -1)
-        for lo, hi, node in zip(left, right, parent, strict=True):
-            observed[lo:hi] = node
-        np.testing.assert_array_equal(observed, expected)
-        np.testing.assert_array_equal(out, alleles[observed - 1, np.arange(6)])
-
-    def test_exact_internal_initial_and_compressed_final(self, matcher):
-        h = np.array([0, 1, 1, 1, 1, 0], dtype=np.int8)
-        out = np.full(6, -9, dtype=np.int8)
-        left, right, parent = matcher.find_path(h, 0, 6, out, initial_state=1)
-        np.testing.assert_array_equal(left, [1, 0])
-        np.testing.assert_array_equal(right, [6, 1])
-        np.testing.assert_array_equal(parent, [3, 1])
-        out[:] = -9
-        left, right, parent = matcher.find_path(h, 0, 1, out, final_state=3)
-        np.testing.assert_array_equal(left, [0])
-        np.testing.assert_array_equal(right, [1])
-        np.testing.assert_array_equal(parent, [3])
-        np.testing.assert_array_equal(out, [0, -9, -9, -9, -9, -9])
-
-    def test_one_site_gap_between_different_anchors(self, matcher):
-        h = np.ones(6, dtype=np.int8)
-        out = np.full(6, -9, dtype=np.int8)
-        left, right, parent = matcher.find_path(
-            h, 0, 3, out, initial_state=2, final_state=3
-        )
-        np.testing.assert_array_equal(left, [1, 0])
-        np.testing.assert_array_equal(right, [3, 1])
-        np.testing.assert_array_equal(parent, [3, 2])
-        np.testing.assert_array_equal(out, [1, 1, 1, -9, -9, -9])
-
-    def test_reuse_across_anchor_and_topology_change(self, reference):
-        tables = reference.dump_tables()
-        tables.edges.clear()
-        for left, right, ancestor in [(0, 1, 2), (1, 6, 3)]:
-            tables.edges.add_row(left, right, 0, 1)
-            tables.edges.add_row(left, right, 1, ancestor)
-        tables.sort()
-        indexes = matching.MatcherIndexes(tables.tree_sequence(), vestigial_root=False)
-        rho = np.full(6, 0.01)
-        mu = np.full(6, 0.01)
-        matcher = matching.AncestorMatcher(indexes, rho, mu, reuse_topology=True)
-        h = np.ones(6, dtype=np.int8)
-        # Node 2's support ends before the first observation after its anchor.
-        for start, end, kwargs in [
-            (0, 4, {"initial_state": 2, "final_state": 3}),
-            (3, 6, {"initial_state": 3}),
-            (0, 6, {}),
-        ]:
-            fresh = matching.AncestorMatcher(indexes, rho, mu)
-            out = np.full(6, -9, dtype=np.int8)
-            expected = out.copy()
-            path = matcher.find_path(h, start, end, out, **kwargs)
-            wanted = fresh.find_path(h, start, end, expected, **kwargs)
-            for actual, desired in zip(path, wanted, strict=True):
-                np.testing.assert_array_equal(actual, desired)
-            np.testing.assert_array_equal(out, expected)
-            if start == 0 and end == 4:
-                np.testing.assert_array_equal(path[0], [1, 0])
-                np.testing.assert_array_equal(path[1], [4, 1])
-                np.testing.assert_array_equal(path[2], [3, 2])
-
-    @pytest.mark.parametrize(
-        "kwargs",
-        [
-            {"initial_state": -2},
-            {"final_state": 4},
-            {"initial_state": 0},
-            {"initial_state": 2, "final_state": 3},
-        ],
-    )
-    def test_bad_endpoints(self, matcher, kwargs):
-        h = np.ones(6, dtype=np.int8)
-        out = np.full(6, -9, dtype=np.int8)
-        with pytest.raises(_tsinfer.LibraryError, match="parent"):
-            matcher.find_path(h, 0, 1, out, **kwargs)
-        np.testing.assert_array_equal(out, -9)
-
-    @pytest.mark.parametrize("state", [1.5, 2**100])
-    def test_endpoint_conversion(self, matcher, state):
-        h = np.ones(6, dtype=np.int8)
-        with pytest.raises((TypeError, OverflowError)):
-            matcher.find_path(h, 0, 6, h.copy(), initial_state=state)
-
-
-class TestPreparedIndexes:
-    @pytest.mark.parametrize(
-        ("states", "error"),
-        [
-            ([1, 1], TypeError),
-            (np.ones(1, dtype=np.int8), ValueError),
-            (np.ones(2, dtype=np.int16), ValueError),
-            (np.full(2, 2, dtype=np.int8), _tsinfer.LibraryError),
-        ],
-    )
-    def test_invalid_mutation_states(self, prepared, states, error):
-        with pytest.raises(error):
-            matching.MatcherIndexes.from_prepared(**prepared, derived_state=states)
-
-    def test_back_mutations(self, reference):
-        tables = reference.dump_tables()
-        tables.mutations.clear()
-        for site in range(reference.num_sites):
-            tables.mutations.add_row(site, 1, "T")
-            if site == 1:
-                tables.mutations.add_row(site, 2, "A")
-        tables.sort()
-        tables.build_index()
-        tables.compute_mutation_parents()
-        reference = tables.tree_sequence()
-        states = (reference.mutations_derived_state != "A").astype(np.int8)
-        owned = matching.MatcherIndexes(
-            reference, vestigial_root=False, derived_state=states
-        )
-        insertion, removal = owned.export_edge_indexes()
-        borrowed = matching.MatcherIndexes.from_prepared(
-            insertion,
-            removal,
-            reference.sites_position,
-            reference.mutations_site,
-            reference.mutations_node,
-            np.full(reference.num_sites, 2, dtype=np.uint64),
-            reference.num_nodes,
-            reference.sequence_length,
-            derived_state=states,
-        )
-        haplotype = np.array([1, 0, 1], dtype=np.int8)
-        paths = []
-        for indexes in (owned, borrowed):
-            matcher = matching.AncestorMatcher(
-                indexes, np.full(3, 1e-3), np.full(3, 1e-20), reuse_topology=True
-            )
-            out = np.empty(3, dtype=np.int8)
-            paths.append(matcher.find_path(haplotype, 0, 3, out))
-            np.testing.assert_array_equal(out, haplotype)
-        for owned_path, borrowed_path in zip(*paths):
-            np.testing.assert_array_equal(owned_path, borrowed_path)
-
-    @pytest.fixture
-    def reference(self):
-        tables = tskit.TableCollection(20)
-        for time in [3, 2, 1]:
-            tables.nodes.add_row(time=time)
-        tables.edges.add_row(0, 20, 0, 1)
-        tables.edges.add_row(0, 20, 1, 2)
-        for position in [2, 5, 10]:
-            site = tables.sites.add_row(position, "A")
-            if position != 5:
-                tables.mutations.add_row(site, 2, "T")
-        tables.sort()
-        return tables.tree_sequence()
-
-    @pytest.fixture
-    def prepared(self, reference):
-        owned = matching.MatcherIndexes(reference, vestigial_root=False)
-        insertion, removal = owned.export_edge_indexes()
-        return dict(
-            insertion=insertion,
-            removal=removal,
-            positions=reference.sites_position,
-            mutation_site=reference.mutations_site,
-            mutation_node=reference.mutations_node,
-            num_alleles=np.full(reference.num_sites, 2, dtype=np.uint64),
-            num_nodes=reference.num_nodes,
-            sequence_length=reference.sequence_length,
-        )
-
-    def test_owner_lifetime_and_outputs(self, prepared):
-        prepared = dict(prepared)
-        for name in ("insertion", "removal"):
-            prepared[name] = prepared[name].copy()
-            prepared[name].flags.writeable = False
-        owners = [weakref.ref(prepared[name]) for name in ("insertion", "removal")]
-        indexes = matching.MatcherIndexes.from_prepared(**prepared)
-        del prepared
-        gc.collect()
-        assert all(owner() is not None for owner in owners)
-        n = indexes.num_sites
-        matcher = matching.AncestorMatcher(
-            indexes, np.full(n, 1e-3), np.zeros(n), reuse_topology=True
-        )
-        del indexes
-        gc.collect()
-        assert all(owner() is not None for owner in owners)
-        h = np.array([1, 0, 1], dtype=np.int8)
-        out = np.empty(n, dtype=np.int8)
-        path = matcher.find_path(h, 0, n, out)
-        saved = [array.copy() for array in path]
-        matcher.find_path(h, 2, 3, out)
-        matcher.find_path(h, 0, 1, out)
-        del matcher
-        gc.collect()
-        assert all(owner() is None for owner in owners)
-        for actual, expected in zip(path, saved):
-            np.testing.assert_array_equal(actual, expected)
-
-    def test_spawned_mappings(self, prepared, tmp_path):
-        paths = []
-        for name in (
-            "insertion",
-            "removal",
-            "positions",
-            "mutation_site",
-            "mutation_node",
-            "num_alleles",
-        ):
-            path = tmp_path / f"{name}.npy"
-            np.save(path, prepared[name], allow_pickle=False)
-            paths.append(path)
-        spec = dict(
-            paths=paths,
-            num_nodes=prepared["num_nodes"],
-            sequence_length=prepared["sequence_length"],
-        )
-        with cf.ProcessPoolExecutor(
-            max_workers=2, mp_context=mp.get_context("spawn")
-        ) as executor:
-            futures = [executor.submit(_match_prepared_files, spec) for _ in range(2)]
-            results = [future.result() for future in futures]
-        for actual, expected in zip(results[0][0], results[1][0]):
-            np.testing.assert_array_equal(actual, expected)
-        np.testing.assert_array_equal(results[0][1], results[1][1])
-
-    @pytest.mark.parametrize(
-        "field",
-        [
-            "insertion",
-            "removal",
-            "positions",
-            "mutation_site",
-            "mutation_node",
-            "num_alleles",
-        ],
-    )
-    def test_wrong_dtype(self, prepared, field):
-        prepared[field] = prepared[field].astype(np.int16)
-        with pytest.raises(ValueError, match="exact native dtype"):
-            matching.MatcherIndexes.from_prepared(**prepared)
-
-    @pytest.mark.parametrize(
-        "change",
-        [
-            "writable",
-            "noncontiguous",
-            "wrong_width",
-            "wrong_edges",
-            "wrong_sites",
-            "wrong_mutations",
-            "unsorted_mutations",
-        ],
-    )
-    def test_invalid_layout(self, prepared, change):
-        if change == "writable":
-            prepared["insertion"] = prepared["insertion"].copy()
-        elif change == "noncontiguous":
-            prepared["insertion"] = prepared["insertion"][:, ::-1]
-        elif change == "wrong_width":
-            prepared["insertion"] = prepared["insertion"].reshape(-1, 2)
-        elif change == "wrong_edges":
-            prepared["removal"] = prepared["removal"][:1]
-        elif change == "wrong_sites":
-            prepared["num_alleles"] = prepared["num_alleles"][:1]
-        elif change == "wrong_mutations":
-            prepared["mutation_node"] = prepared["mutation_node"][:1]
-        else:
-            prepared["mutation_site"] = prepared["mutation_site"][::-1].copy()
-        with pytest.raises(ValueError):
-            matching.MatcherIndexes.from_prepared(**prepared)
-
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [("num_nodes", 0), ("sequence_length", float("nan")), ("sequence_length", -1)],
-    )
-    def test_invalid_scalars(self, prepared, field, value):
-        prepared[field] = value
-        with pytest.raises(ValueError):
-            matching.MatcherIndexes.from_prepared(**prepared)
-
-    @pytest.mark.parametrize("value", [-1, float("nan"), 20, 1])
-    def test_invalid_positions(self, prepared, value):
-        prepared["positions"] = prepared["positions"].copy()
-        prepared["positions"][1] = value
-        with pytest.raises(ValueError, match="site positions"):
-            matching.MatcherIndexes.from_prepared(**prepared)
