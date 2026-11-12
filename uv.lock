@@ -2942,7 +2942,7 @@ requires-dist = [
     { name = "psutil" },
     { name = "tqdm" },
     { name = "tskit", specifier = ">=1.0.0" },
-    { name = "tsls", git = "file:///Users/duncan/work/tsls?rev=4f411ed1d68308edc6caf0a35e17faff148b0ba4" },
+    { name = "tsls", git = "file:///Users/duncan/work/tsls?rev=c560b405761ae09625e266d39c2356ccc4b54b69" },
     { name = "vcztools", specifier = ">=0.2" },
     { name = "zarr", specifier = ">=3" },
 ]
@@ -3037,8 +3037,8 @@ wheels = [
 
 [[package]]
 name = "tsls"
-version = "0.1.dev120"
-source = { git = "file:///Users/duncan/work/tsls?rev=4f411ed1d68308edc6caf0a35e17faff148b0ba4#4f411ed1d68308edc6caf0a35e17faff148b0ba4" }
+version = "0.1.dev121"
+source = { git = "file:///Users/duncan/work/tsls?rev=c560b405761ae09625e266d39c2356ccc4b54b69#c560b405761ae09625e266d39c2356ccc4b54b69" }
 dependencies = [
     { name = "numpy" },
     { name = "tskit" },
