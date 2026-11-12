@@ -1334,13 +1334,16 @@ class TestMatchHmmParameters:
         assert src.recombination_rate is None
         assert src.mismatch is None
         assert src.likelihood_threshold is None
+        assert src.prune_threshold is None
+        assert src.relative_prune_threshold is None
 
     def test_parse_values(self, tmp_path):
         cfg = self._load(
             tmp_path,
             "recombination_rate = 1e-8\nmismatch = 1e-10\n",
             'recombination_rate = "maps/chr20.txt"\nmismatch = 1e-4\n'
-            "likelihood_threshold = 1e-12\n",
+            "likelihood_threshold = 1e-12\n"
+            "prune_threshold = 1e-8\nrelative_prune_threshold = 1e-9\n",
         )
         anc = cfg.match.sources["ancestors"]
         assert anc.recombination_rate == 1e-8
@@ -1350,6 +1353,8 @@ class TestMatchHmmParameters:
         assert cohort.recombination_rate == "maps/chr20.txt"
         assert cohort.mismatch == 1e-4
         assert cohort.likelihood_threshold == 1e-12
+        assert cohort.prune_threshold == 1e-8
+        assert cohort.relative_prune_threshold == 1e-9
 
     def test_integer_rate_becomes_float(self, tmp_path):
         cfg = self._load(tmp_path, "recombination_rate = 0\n")
@@ -1375,7 +1380,10 @@ class TestMatchHmmParameters:
                 node_flags=0, recombination_rate="map.txt", mismatch=1e-6
             ),
             "cohort": config.MatchSourceConfig(
-                recombination=0.01, likelihood_threshold=1e-9
+                recombination=0.01,
+                likelihood_threshold=1e-9,
+                prune_threshold=1e-8,
+                relative_prune_threshold=1e-7,
             ),
         }
         text = _minimal_config(match=_minimal_match_cfg(sources=sources)).format()
@@ -1383,6 +1391,8 @@ class TestMatchHmmParameters:
         assert "mismatch = 1e-06" in text
         assert "recombination = 0.01" in text
         assert "likelihood_threshold = 1e-09" in text
+        assert "prune_threshold = 1e-08" in text
+        assert "relative_prune_threshold = 1e-07" in text
 
     def test_format_omits_unset(self):
         text = _minimal_config().format()

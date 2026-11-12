@@ -160,6 +160,38 @@ def find_path(
 
 
 class TestTslsContract:
+    def test_conditioned_regional_output(self, panel_ts, allele_mapper):
+        source = config.MatchSourceConfig(
+            recombination=0.1,
+            mismatch=0.01,
+            likelihood_threshold=1e-12,
+            prune_threshold=1e-8,
+            relative_prune_threshold=1e-9,
+        )
+        params = matching.hmm_parameters(source, POSITIONS)
+        hmm = tsls.Hmm(
+            tsls_ts(panel_ts, allele_mapper),
+            params.recombination,
+            params.mismatch,
+            likelihood_threshold=params.likelihood_threshold,
+            prune_threshold=params.prune_threshold,
+            relative_prune_threshold=params.relative_prune_threshold,
+        )
+        h = np.array([1, 1, 1, 0], dtype=np.int8)
+        out = np.full(4, -9, dtype=np.int8)
+        left, right, parent = hmm.find_path(
+            h, 1, 3, out, initial_state=4, final_state=5, preserve_outside=True
+        )
+        assert parent[-1] == 4
+        assert parent[0] == 5
+        assert left[-1] == POSITIONS[1]
+        assert right[0] == POSITIONS[3]
+        np.testing.assert_array_equal(out[[0, 3]], -9)
+        alleles = node_haplotypes(panel_ts, allele_mapper)
+        for lo, hi, donor in zip(left, right, parent):
+            included = (POSITIONS >= lo) & (POSITIONS < hi)
+            np.testing.assert_array_equal(out[included], alleles[donor, included])
+
     def test_forward_map_alleles(self, panel_ts, allele_mapper):
         # The allele mapper's padded forward map is accepted as the per-site
         # alleles, and the number of alleles at each site is the VCZ count,

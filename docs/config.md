@@ -114,6 +114,8 @@ sequence needs an entry here.
 | `recombination` | float | `0.01` | Probability of recombination between each pair of adjacent inference sites |
 | `mismatch` | float | `1e-20` | Probability of a mismatch (an extra mutation) at each inference site |
 | `likelihood_threshold` | float | smallest positive double | Lower bound on the normalised HMM likelihoods. Larger values (e.g. `1e-13`) let more likelihoods be merged, making matching faster at some cost in accuracy |
+| `prune_threshold` | float | `0` | Viterbi likelihood cutoff below which values are set to `likelihood_threshold`; zero disables pruning |
+| `relative_prune_threshold` | float | `0` | Relative likelihood cutoff for all HMM algorithms; zero disables relative pruning |
 
 These are the parameters of the Li & Stephens copying HMM used to match each
 haplotype from the source. The defaults (a high recombination probability and a

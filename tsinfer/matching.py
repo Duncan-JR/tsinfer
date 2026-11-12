@@ -78,6 +78,8 @@ class HmmParameters:
     recombination: np.ndarray  # (num_sites,) float64 probabilities
     mismatch: np.ndarray  # (num_sites,) float64 probabilities
     likelihood_threshold: float | None = None
+    prune_threshold: float | None = None
+    relative_prune_threshold: float | None = None
 
 
 def read_genetic_map(path: str | pathlib.Path, positions: np.ndarray) -> np.ndarray:
@@ -152,6 +154,8 @@ def hmm_parameters(
         recombination=recombination,
         mismatch=np.full(num_sites, mismatch),
         likelihood_threshold=source_config.likelihood_threshold,
+        prune_threshold=source_config.prune_threshold,
+        relative_prune_threshold=source_config.relative_prune_threshold,
     )
 
 
@@ -347,6 +351,8 @@ class Matcher:
             params.recombination,
             params.mismatch,
             likelihood_threshold=params.likelihood_threshold,
+            prune_threshold=params.prune_threshold,
+            relative_prune_threshold=params.relative_prune_threshold,
         )
         t_init = time_.monotonic() - t0
 

@@ -179,6 +179,8 @@ class MatchSourceConfig:
     recombination_rate: float | str | pathlib.Path | None = None
     mismatch: float | None = None
     likelihood_threshold: float | None = None
+    prune_threshold: float | None = None
+    relative_prune_threshold: float | None = None
 
     def __post_init__(self):
         if self.recombination is not None and self.recombination_rate is not None:
@@ -324,6 +326,8 @@ class Config:
                 "recombination_rate",
                 "mismatch",
                 "likelihood_threshold",
+                "prune_threshold",
+                "relative_prune_threshold",
             ]:
                 value = getattr(src_cfg, key)
                 if value is not None:
@@ -486,6 +490,8 @@ _KNOWN_MATCH_SOURCE_KEYS = {
     "recombination_rate",
     "mismatch",
     "likelihood_threshold",
+    "prune_threshold",
+    "relative_prune_threshold",
 }
 
 _KNOWN_INDIVIDUAL_METADATA_KEYS = {"fields", "population"}
@@ -631,6 +637,10 @@ def _parse_match(raw: dict) -> MatchConfig:
                     mismatch=_optional_float(src_val.get("mismatch")),
                     likelihood_threshold=_optional_float(
                         src_val.get("likelihood_threshold")
+                    ),
+                    prune_threshold=_optional_float(src_val.get("prune_threshold")),
+                    relative_prune_threshold=_optional_float(
+                        src_val.get("relative_prune_threshold")
                     ),
                 )
             else:
