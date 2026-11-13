@@ -77,6 +77,7 @@ class HmmParameters:
 
     recombination: np.ndarray  # (num_sites,) float64 probabilities
     mismatch: np.ndarray  # (num_sites,) float64 probabilities
+    sample_size: int | None = None
     likelihood_threshold: float | None = None
     prune_threshold: float | None = None
     relative_prune_threshold: float | None = None
@@ -153,6 +154,7 @@ def hmm_parameters(
     return HmmParameters(
         recombination=recombination,
         mismatch=np.full(num_sites, mismatch),
+        sample_size=source_config.sample_size,
         likelihood_threshold=source_config.likelihood_threshold,
         prune_threshold=source_config.prune_threshold,
         relative_prune_threshold=source_config.relative_prune_threshold,
@@ -350,6 +352,7 @@ class Matcher:
             self._ts,
             params.recombination,
             params.mismatch,
+            sample_size=params.sample_size,
             likelihood_threshold=params.likelihood_threshold,
             prune_threshold=params.prune_threshold,
             relative_prune_threshold=params.relative_prune_threshold,

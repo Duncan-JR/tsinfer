@@ -178,11 +178,15 @@ class MatchSourceConfig:
     recombination: float | None = None
     recombination_rate: float | str | pathlib.Path | None = None
     mismatch: float | None = None
+    sample_size: int | None = None
     likelihood_threshold: float | None = None
     prune_threshold: float | None = None
     relative_prune_threshold: float | None = None
 
     def __post_init__(self):
+        if self.sample_size is not None:
+            if type(self.sample_size) is not int or self.sample_size < 1:
+                raise ValueError("sample_size must be a positive haploid count")
         if self.recombination is not None and self.recombination_rate is not None:
             raise ValueError(
                 "Cannot specify both 'recombination' and 'recombination_rate'"
@@ -322,6 +326,7 @@ class Config:
             lines.append(f"    node_flags = {src_cfg.node_flags}")
             lines.append(f"    create_individuals = {src_cfg.create_individuals}")
             for key in [
+                "sample_size",
                 "recombination",
                 "recombination_rate",
                 "mismatch",
@@ -484,6 +489,7 @@ _KNOWN_MATCH_KEYS = {
 }
 
 _KNOWN_MATCH_SOURCE_KEYS = {
+    "sample_size",
     "node_flags",
     "create_individuals",
     "recombination",
@@ -635,6 +641,7 @@ def _parse_match(raw: dict) -> MatchConfig:
                         src_val.get("recombination_rate")
                     ),
                     mismatch=_optional_float(src_val.get("mismatch")),
+                    sample_size=src_val.get("sample_size"),
                     likelihood_threshold=_optional_float(
                         src_val.get("likelihood_threshold")
                     ),
